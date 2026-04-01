@@ -1,0 +1,26 @@
+[
+  {
+    "name": "lucidlink-api",
+    "script": "lucid-api-server.js"
+  },
+  {
+    "name": "lucidlink-connect-api",
+    "script": "connect-server.js"
+  },
+  {
+    "name": "lucidlink-filespace-search",
+    "script": "search-server.js"
+  },
+  {
+    "name": "lucidlink-filespace-browser",
+    "script": "browser-server.js"
+  },
+  {
+    "name": "lucidlink-audit-trail",
+    "script": "audit-trail-server.js"
+  },
+  {
+    "name": "lucidlink-python-sdk",
+    "script": "python-sdk-server.js"
+  }
+]

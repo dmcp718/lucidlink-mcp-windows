@@ -1,0 +1,14 @@
+# Build output
+build/
+
+# Node
+mcp-server/node_modules/
+mcp-server/dist/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
