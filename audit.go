@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -295,31 +296,29 @@ func (a *AuditDB) TimeHistogram(p SearchParams) ([]map[string]interface{}, error
 }
 
 // Stats returns summary statistics, optionally filtered.
+// One aggregate query instead of four — SQLite computes all five values
+// in a single scan with the same WHERE clause.
 func (a *AuditDB) Stats(p SearchParams) map[string]interface{} {
 	where, args := buildWhere(p)
 	stats := map[string]interface{}{}
 
-	var total int
-	a.db.QueryRow("SELECT COUNT(*) FROM audit_events"+where, args...).Scan(&total)
-	stats["totalEvents"] = total
+	q := `SELECT
+		COUNT(*),
+		COUNT(DISTINCT user_name),
+		COUNT(DISTINCT CASE WHEN filespace != '' THEN filespace END),
+		MIN(timestamp),
+		MAX(timestamp)
+	FROM audit_events` + where
 
-	var users int
-	a.db.QueryRow("SELECT COUNT(DISTINCT user_name) FROM audit_events"+where, args...).Scan(&users)
-	stats["uniqueUsers"] = users
-
-	var filespaces int
-	if where == "" {
-		a.db.QueryRow("SELECT COUNT(DISTINCT filespace) FROM audit_events WHERE filespace != ''").Scan(&filespaces)
-	} else {
-		a.db.QueryRow("SELECT COUNT(DISTINCT filespace) FROM audit_events"+where+" AND filespace != ''", args...).Scan(&filespaces)
-	}
-	stats["filespaces"] = filespaces
-
+	var total, users, filespaces int
 	var oldest, newest sql.NullString
-	a.db.QueryRow("SELECT MIN(timestamp), MAX(timestamp) FROM audit_events"+where, args...).Scan(&oldest, &newest)
+	a.db.QueryRow(q, args...).Scan(&total, &users, &filespaces, &oldest, &newest)
+
+	stats["totalEvents"] = total
+	stats["uniqueUsers"] = users
+	stats["filespaces"] = filespaces
 	stats["oldestEvent"] = oldest.String
 	stats["newestEvent"] = newest.String
-
 	return stats
 }
 
@@ -424,6 +423,14 @@ func resolveTime(s string) string {
 
 // --- Log file watcher ---
 
+// fileFingerprint is the (size, mtime) pair we use to detect file changes
+// between polls. Audit logs only grow, so any change to either field means
+// new content to ingest.
+type fileFingerprint struct {
+	size  int64
+	mtime time.Time
+}
+
 // AuditWatcher watches .lucid_audit directories and ingests new log lines into SQLite.
 type AuditWatcher struct {
 	db        *AuditDB
@@ -432,6 +439,11 @@ type AuditWatcher struct {
 	wg        sync.WaitGroup
 	running   bool
 	mu        sync.Mutex
+
+	// Cache of last-seen (size, mtime) per file path. Lets scanAndIngest
+	// skip unchanged files entirely without opening or stat'ing the offset DB.
+	// Owned by watchLoop goroutine; not concurrent.
+	seen map[string]fileFingerprint
 
 	// Stats
 	filesProcessed int
@@ -445,6 +457,7 @@ func NewAuditWatcher(db *AuditDB, mountPath string) *AuditWatcher {
 		db:        db,
 		mountPath: mountPath,
 		stopCh:    make(chan struct{}),
+		seen:      make(map[string]fileFingerprint),
 	}
 }
 
@@ -524,24 +537,38 @@ func (w *AuditWatcher) scanAndIngest() {
 		return
 	}
 
-	var logFiles []string
+	// Walk once; only ingest files whose (size, mtime) changed since last poll.
+	// Audit logs only grow, so unchanged fingerprint == nothing to do.
+	type pending struct {
+		path string
+		fp   fileFingerprint
+	}
+	var changed []pending
+
 	filepath.Walk(auditDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
+		if err != nil || info.IsDir() {
 			return nil
 		}
-		if !info.IsDir() && (strings.HasSuffix(info.Name(), ".log") || strings.Contains(info.Name(), ".log.")) {
-			logFiles = append(logFiles, path)
+		name := info.Name()
+		if !strings.HasSuffix(name, ".log") && !strings.Contains(name, ".log.") {
+			return nil
 		}
+		fp := fileFingerprint{size: info.Size(), mtime: info.ModTime()}
+		if prev, ok := w.seen[path]; ok && prev == fp {
+			return nil // unchanged since last poll
+		}
+		changed = append(changed, pending{path: path, fp: fp})
 		return nil
 	})
 
-	for _, logFile := range logFiles {
+	for _, p := range changed {
 		select {
 		case <-w.stopCh:
 			return
 		default:
 		}
-		w.ingestFile(logFile)
+		w.ingestFile(p.path)
+		w.seen[p.path] = p.fp
 	}
 }
 
@@ -563,7 +590,7 @@ func (w *AuditWatcher) ingestFile(path string) {
 
 	buf := make([]byte, 0, 64*1024)
 	readBuf := make([]byte, 32*1024)
-	var events []AuditEvent
+	events := make([]AuditEvent, 0, 256)
 	totalRead := offset
 
 	for {
@@ -574,22 +601,19 @@ func (w *AuditWatcher) ingestFile(path string) {
 
 			// Process complete lines.
 			for {
-				idx := indexOf(buf, '\n')
+				idx := bytes.IndexByte(buf, '\n')
 				if idx < 0 {
 					break
 				}
-				line := buf[:idx]
+				line := bytes.TrimSpace(buf[:idx])
 				buf = buf[idx+1:]
 
-				line = trimBytes(line)
 				if len(line) == 0 {
 					continue
 				}
 
 				var event AuditEvent
-				dec := json.NewDecoder(strings.NewReader(string(line)))
-				dec.UseNumber()
-				if dec.Decode(&event) == nil && event.Operation.Action != "" {
+				if json.Unmarshal(line, &event) == nil && event.Operation.Action != "" {
 					events = append(events, event)
 				}
 			}
@@ -616,25 +640,6 @@ func (w *AuditWatcher) ingestFile(path string) {
 
 	// Always update offset even if no new events (tracks position for empty reads).
 	w.db.SetFileOffset(path, totalRead)
-}
-
-func indexOf(b []byte, c byte) int {
-	for i, v := range b {
-		if v == c {
-			return i
-		}
-	}
-	return -1
-}
-
-func trimBytes(b []byte) []byte {
-	for len(b) > 0 && (b[0] == ' ' || b[0] == '\t' || b[0] == '\r') {
-		b = b[1:]
-	}
-	for len(b) > 0 && (b[len(b)-1] == ' ' || b[len(b)-1] == '\t' || b[len(b)-1] == '\r') {
-		b = b[:len(b)-1]
-	}
-	return b
 }
 
 // FilespaceMount represents a discovered LucidLink filespace instance.
@@ -671,11 +676,24 @@ func discoverViaLucidCLI() []FilespaceMount {
 		return nil
 	}
 
-	var mounts []FilespaceMount
-	for _, inst := range instances {
-		mount := getLucidInstanceStatus(inst.InstanceID, inst.Filespace)
-		if mount != nil {
-			mounts = append(mounts, *mount)
+	// Run "lucid --instance <id> status" in parallel — each call shells out
+	// and waits on the CLI, so total time scales with the slowest instance
+	// rather than the sum of all instances.
+	results := make([]*FilespaceMount, len(instances))
+	var wg sync.WaitGroup
+	for i, inst := range instances {
+		wg.Add(1)
+		go func(i int, inst FilespaceMount) {
+			defer wg.Done()
+			results[i] = getLucidInstanceStatus(inst.InstanceID, inst.Filespace)
+		}(i, inst)
+	}
+	wg.Wait()
+
+	mounts := make([]FilespaceMount, 0, len(results))
+	for _, m := range results {
+		if m != nil {
+			mounts = append(mounts, *m)
 		}
 	}
 	return mounts
