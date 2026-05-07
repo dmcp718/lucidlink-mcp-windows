@@ -52,20 +52,23 @@ async function ensureReady(): Promise<string | null> {
 // ── Server ──
 
 const server = new McpServer(
-  { name: "lucidlink-api", version: "2.1.0" },
+  { name: "lucidlink-api", version: "2.3.1" },
   { instructions: `LucidLink Admin API server — manages filespaces, members, groups, and permissions.
 
 The LucidLink API runs as a self-hosted Docker container (lucidlink/lucidlink-api on DockerHub).
 Configure the API URL via LUCIDLINK_API_URL env var (default: http://localhost:3003/api/v1).
 Set your bearer token via LUCIDLINK_BEARER_TOKEN env var or in ~/.lucidlink/mcp-config.json.
 
+CANONICAL CRUD FLOW: every resource (filespaces, members, groups, permissions) returns IDs from
+create/list operations. Always start with list_filespaces / list_members / list_groups /
+list_permissions to discover IDs before calling get_*, update_*, delete_*, grant_*, or revoke_*.
+All IDs are UUIDs.
+
 Key workflows:
 - Set up a filespace: list_providers → create_filespace → add_member → create_group → add_member_to_group → grant_permission
 - Manage access: list_members/list_groups to find IDs, then grant_permission/update_permission/revoke_permission
 - add_member_to_group is the batch endpoint (PUT /groups/members) — use it for adding one or many members
-- For questions about the API (authentication, deployment, best practices, scaling, Connect): use search_api_docs
-
-All IDs are UUIDs returned by create/list operations. Always list first to get IDs before operating on specific resources.` },
+- For questions about the API (authentication, deployment, best practices, scaling, Connect): use search_api_docs` },
 );
 
 registerBrandResource(server);
@@ -92,7 +95,7 @@ server.tool(
 
 server.tool(
   "create_filespace",
-  "Create a new LucidLink filespace. Returns the filespace ID and details. Use list_providers first to see available storage providers.",
+  "Create a new LucidLink filespace. Returns the filespace ID and details.",
   {
     name: z.string().describe("Name (3-63 chars, alphanumeric with hyphens/underscores)"),
     region: z.string().optional().describe("Storage region (e.g. us-east-1)"),
@@ -114,7 +117,7 @@ server.tool(
 
 server.tool(
   "list_filespaces",
-  "List all filespaces in the workspace. Returns name, ID, region, and status for each. Use the ID from results to call other filespace operations.",
+  "List all filespaces in the workspace. Returns name, ID, region, and status for each.",
   {},
   async () => {
     const startErr = await ensureReady();
@@ -151,7 +154,7 @@ server.tool(
 
 server.tool(
   "update_filespace",
-  "Rename a filespace. Requires the filespace ID (from list_filespaces) and the new name.",
+  "Rename a filespace.",
   {
     filespace_id: z.string().describe("ID of the filespace"),
     name: z.string().describe("New name"),
@@ -194,7 +197,7 @@ server.tool(
 
 server.tool(
   "add_member",
-  "Invite a user to the workspace by email. Returns member ID, status (pending/active), and an invitation link if applicable. Use the member ID for group and permission operations.",
+  "Invite a user to the workspace by email. Returns member ID, status (pending/active), and an invitation link if applicable.",
   { email: z.string().describe("Email address of the member") },
   async ({ email }) => {
     const v = validateEmail(email);
@@ -218,7 +221,7 @@ server.tool(
 
 server.tool(
   "list_members",
-  "List all workspace members. Returns email, status (active/pending), and member ID for each. Optionally filter by email to find a specific member.",
+  "List all workspace members. Returns email, status (active/pending), and member ID for each.",
   { email: z.string().optional().describe("Optional email filter") },
   async ({ email }) => {
     const startErr = await ensureReady();
@@ -271,10 +274,12 @@ server.tool(
 
 server.tool(
   "update_member_role",
-  "Change a member's workspace role. Roles: 'admin' (full access), 'filespaceAdmin' (manages specific filespaces — requires filespace_ids), 'standard' (default).",
+  "Change a member's workspace role.",
   {
     member_id: z.string().describe("ID of the member"),
-    role: z.enum(["admin", "filespaceAdmin", "standard"]).describe("New role"),
+    role: z.enum(["admin", "filespaceAdmin", "standard"]).describe(
+      "admin = full access, filespaceAdmin = manages specific filespaces (requires filespace_ids), standard = default",
+    ),
     filespace_ids: z.array(z.string()).optional().describe("Required for filespaceAdmin: filespace IDs to manage"),
   },
   async ({ member_id, role, filespace_ids }) => {
@@ -317,7 +322,7 @@ server.tool(
 
 server.tool(
   "create_group",
-  "Create a new group for organizing members. Returns the group ID. Groups can then be assigned permissions on filespace folders.",
+  "Create a new group for organizing members. Returns the group ID.",
   {
     name: z.string().describe("Name for the new group"),
     description: z.string().optional().describe("Optional group description"),
@@ -372,7 +377,7 @@ server.tool(
 
 server.tool(
   "update_group",
-  "Rename a group. Requires the group ID (from list_groups) and the new name.",
+  "Rename a group.",
   {
     group_id: z.string().describe("ID of the group"),
     name: z.string().describe("New name for the group"),
@@ -435,7 +440,7 @@ server.tool(
 
 server.tool(
   "add_member_to_group",
-  "Add a member to a group. Uses the batch membership endpoint (PUT /groups/members). Get member_id from list_members and group_id from list_groups.",
+  "Add a member to a group. Uses the batch membership endpoint (PUT /groups/members).",
   {
     group_id: z.string().describe("ID of the group"),
     member_id: z.string().describe("ID of the member to add"),
@@ -473,11 +478,11 @@ server.tool(
 
 server.tool(
   "grant_permission",
-  "Grant folder-level permissions to a member or group on a filespace. Permissions: 'read', 'write'. Specify a path to scope the permission to a subdirectory.",
+  "Grant folder-level permissions to a member or group on a filespace. Specify a path to scope the permission to a subdirectory.",
   {
     filespace_id: z.string().describe("ID of the filespace"),
-    principal_id: z.string().describe("ID of the member or group"),
-    permissions: z.array(z.string()).optional().describe("Permissions to grant (read, write) — default: ['read']"),
+    principal_id: z.string().describe("Member ID or group ID"),
+    permissions: z.array(z.enum(["read", "write"])).optional().describe("Default: ['read']"),
     path: z.string().optional().describe("Path within filespace (default: /)"),
   },
   async ({ filespace_id, principal_id, permissions, path }) => {
@@ -493,7 +498,7 @@ server.tool(
 
 server.tool(
   "list_permissions",
-  "List all permission entries for a filespace. Returns principal ID, permission levels, and path for each. Use principal_id to filter permissions for a specific member or group.",
+  "List all permission entries for a filespace. Returns principal ID, permission levels, and path for each.",
   {
     filespace_id: z.string().describe("ID of the filespace"),
     principal_id: z.string().optional().describe("Filter by member or group ID"),
@@ -523,7 +528,7 @@ server.tool(
 
 server.tool(
   "update_permission",
-  "Change the permission level(s) on an existing permission entry. Get the permission_id from list_permissions.",
+  "Change the permission level(s) on an existing permission entry.",
   {
     filespace_id: z.string().describe("ID of the filespace"),
     permission_id: z.string().describe("ID of the permission to update"),
@@ -542,7 +547,7 @@ server.tool(
 
 server.tool(
   "revoke_permission",
-  "Remove a permission entry from a filespace. The member/group will lose the access granted by this entry. Get permission_id from list_permissions.",
+  "Remove a permission entry from a filespace. The member/group will lose the access granted by this entry.",
   {
     filespace_id: z.string().describe("ID of the filespace"),
     permission_id: z.string().describe("ID of the permission to revoke"),
@@ -610,7 +615,7 @@ server.tool(
 
 server.tool(
   "list_providers",
-  "List available cloud storage providers (AWS, Azure, GCP, Wasabi). Call this before create_filespace to see valid provider options.",
+  "List available cloud storage providers (AWS, Azure, GCP, Wasabi).",
   {},
   async () => {
     const startErr = await ensureReady();

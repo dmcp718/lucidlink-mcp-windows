@@ -18,8 +18,13 @@ import { registerCapabilitiesResource } from "./shared/capabilities-resource.js"
 import { ok, err } from "./shared/formatters.js";
 
 const server = new McpServer(
-  { name: "lucidlink-filespace-browser", version: "1.0.0" },
-  { instructions: `Generates a standalone web app for browsing filespace contents. Use create_filespace_browser — it writes files, installs deps, starts the server, and opens the browser. Never build file browsers manually.` },
+  { name: "lucidlink-filespace-browser", version: "2.3.1" },
+  { instructions: `Generates a standalone web app for browsing filespace contents.
+
+Use create_filespace_browser when the user asks to browse, explore, view, navigate, list, or inspect
+filespace contents, files, folders, directories, or entries in a UI, web app, dashboard, browser,
+file browser, directory tree, folder explorer, filespace viewer, tree view, or file manager
+— always use it instead of building a UI manually.` },
 );
 
 registerBrandResource(server);
@@ -27,7 +32,7 @@ registerCapabilitiesResource(server);
 
 server.tool(
   "create_filespace_browser",
-  "REQUIRED when user asks to browse, explore, view, navigate, list, or inspect filespace contents, files, folders, directories, or entries in a browser, UI, web app, dashboard, or visual interface. Also triggers for: file browser, directory tree, folder explorer, filespace viewer, tree view, file manager. Generates a complete ready-to-use web application with a tree-based filespace browser — do NOT build a UI manually, always use this tool instead. It writes files, installs dependencies, starts the server, and opens the browser automatically.",
+  "Generate a tree-based filespace browser web app. Writes files, runs npm install, starts the server. Returns the running URL.",
   {
     output_dir: z.string().optional().describe("Directory to write files (default: ~/Desktop/filespace-browser)"),
     port: z.number().optional().describe("Port to run on (default: 3099)"),

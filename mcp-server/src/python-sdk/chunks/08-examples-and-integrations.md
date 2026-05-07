@@ -1,279 +1,349 @@
 # LucidLink Python SDK — Examples & Integrations
 
-## Basic Streaming (basic_streaming.py)
+**Version:** 0.8.10
 
-### Binary Read/Write
+The canonical example repository is
+[`LucidLink/lucidlink-python-sdk-examples`](https://github.com/LucidLink/lucidlink-python-sdk-examples).
+It ships six runnable scripts under `examples/` plus an `llconnect` reference
+tool under `tools/llconnect/`. Every snippet in this chunk mirrors a script
+in that repository.
+
+## Environment
+
+All examples read service-account credentials from environment variables:
+
+```bash
+export LUCIDLINK_SA_TOKEN="sa_live:your_key"
+export LUCIDLINK_FILESPACE="my-filespace"
+export LUCIDLINK_WORKSPACE="my-workspace"   # fsspec-based examples only
+```
+
+Install the SDK (add the `fsspec` extra for the URL-based examples):
+
+```bash
+pip install lucidlink fsspec pandas pyarrow
+# or
+pip install "lucidlink[fsspec]" pandas pyarrow
+```
+
+---
+
+## 01 — Quickstart (`01_quickstart.py`)
+
+Minimum viable program: create a daemon, authenticate, link a filespace,
+read/write one file, unlink and stop.
+
+```python
+import os
+import lucidlink
+
+token = os.environ["LUCIDLINK_SA_TOKEN"]
+filespace_name = os.environ["LUCIDLINK_FILESPACE"]
+
+daemon = lucidlink.create_daemon()
+daemon.start()
+try:
+    creds = lucidlink.ServiceAccountCredentials(token=token)
+    workspace = daemon.authenticate(creds)
+    print(f"workspace: {workspace.name}")
+
+    for fs_info in workspace.list_filespaces():
+        print(f"  - {fs_info.name}")
+
+    filespace = workspace.link_filespace(name=filespace_name)
+    try:
+        with filespace.fs.open("/quickstart.txt", "w") as f:
+            f.write("hello from 0.8.10\n")
+
+        with filespace.fs.open("/quickstart.txt", "r") as f:
+            print(f.read())
+
+        for entry in filespace.fs.read_dir("/"):
+            tag = "dir" if entry.is_dir() else "file"
+            print(f"  {entry.name} [{tag}] {entry.size} bytes")
+
+        filespace.fs.delete("/quickstart.txt")
+    finally:
+        filespace.unlink()
+finally:
+    daemon.stop()
+```
+
+---
+
+## 02 — File operations (`02_file_operations.py`)
+
+Exhaustive tour of every `filespace.fs` method — `create_dir`, `dir_exists`,
+`file_exists`, `read_dir`, `list_dir`, `delete_dir`, `write_file`,
+`read_file`, `open`, `get_entry`, `get_size`, `get_statistics`, `move`,
+`truncate`, `delete`.
 
 ```python
 import lucidlink
 
-daemon = lucidlink.create_daemon(sandboxed=True)
+DEMO = "/examples_demo"
+
+daemon = lucidlink.create_daemon()
 daemon.start()
-creds = lucidlink.ServiceAccountCredentials(token="sa_live:...")
-workspace = daemon.authenticate(creds)
-filespace = workspace.link_filespace(name="data")
+try:
+    creds = lucidlink.ServiceAccountCredentials(token=token)
+    workspace = daemon.authenticate(creds)
+    with workspace.link_filespace(name=filespace_name) as filespace:
+        fs = filespace.fs
 
-# Write binary
-with filespace.open("/test.bin", "wb") as f:
-    f.write(b"Hello, binary world!")
+        fs.create_dir(DEMO)
+        fs.write_file(f"{DEMO}/hello.txt", b"hello")
+        assert fs.file_exists(f"{DEMO}/hello.txt")
+        assert fs.read_file(f"{DEMO}/hello.txt") == b"hello"
 
-# Read binary
-with filespace.open("/test.bin", "rb") as f:
+        entry = fs.get_entry(f"{DEMO}/hello.txt")
+        print(f"{entry.name} / size={entry.size} / type={entry.type}")
+
+        # Stream I/O
+        with fs.open(f"{DEMO}/stream.bin", "wb") as f:
+            f.write(b"x" * 1024)
+        with fs.open(f"{DEMO}/stream.bin", "rb") as f:
+            f.seek(512)
+            half = f.read(256)
+
+        fs.move(f"{DEMO}/stream.bin", f"{DEMO}/stream_renamed.bin")
+        fs.truncate(f"{DEMO}/stream_renamed.bin", 128)
+
+        size = fs.get_size()
+        stats = fs.get_statistics()
+        print(f"entries={size.entries}  files={stats.file_count}")
+
+        fs.delete_dir(DEMO, recursive=True)
+finally:
+    daemon.stop()
+```
+
+`with workspace.link_filespace(...) as filespace` relies on the native
+`Filespace.__enter__` / `__exit__` — the filespace is automatically
+unlinked (and `sync_all()` runs first if `sync_mode=SyncMode.SYNC_ALL`).
+
+---
+
+## 03 — File locking (`03_file_locking.py`)
+
+Locks live on the open file handle. Pass `lock_type="shared"` or
+`lock_type="exclusive"` to `filespace.fs.open()`; the lock is released
+when the handle is closed.
+
+```python
+# Shared (reader) lock — multiple readers allowed
+with filespace.fs.open("/locking_demo/data.bin", "rb", lock_type="shared") as f:
     data = f.read()
-    print(data)  # b"Hello, binary world!"
 
-filespace.sync_all()
-daemon.stop()
+# Exclusive (writer) lock — blocks everybody else until close
+with filespace.fs.open("/locking_demo/data.bin", "wb", lock_type="exclusive") as f:
+    f.write(b"updated")
+
+# Read-modify-write under an exclusive lock
+with filespace.fs.open("/locking_demo/data.bin", "r+b", lock_type="exclusive") as f:
+    existing = f.read()
+    f.seek(0)
+    f.write(existing.upper())
+    f.truncate()
 ```
 
-### Text Mode
+The underlying `Filesystem` also exposes a low-level byte-range locking API
+(`lock_byte_range` / `unlock_byte_range` / `unlock_all_byte_ranges` keyed on
+a handle ID) for cross-daemon coordination; see chunk 10.
+
+---
+
+## 04 — Connect (S3 external files) (`04_connect_s3.py`)
+
+Attach S3 objects as read-only files via `filespace.connect`. Requires a
+filespace of version V9+ — call
+`filespace.connect.are_data_stores_available()` to gate the workflow.
 
 ```python
-# Write text
-with filespace.open("/notes.txt", "wt", encoding="utf-8") as f:
-    f.write("Line 1\n")
-    f.write("Line 2\n")
+import os
+import lucidlink
 
-# Read text
-with filespace.open("/notes.txt", "rt", encoding="utf-8") as f:
-    for line in f:
-        print(line.strip())
+endpoint = os.environ.get("S3_ENDPOINT", "")
+bucket   = os.environ["S3_BUCKET"]
+access   = os.environ["S3_ACCESS_KEY"]
+secret   = os.environ["S3_SECRET_KEY"]
+region   = os.environ.get("S3_REGION", "us-east-1")
+
+daemon = lucidlink.create_daemon()
+daemon.start()
+try:
+    creds = lucidlink.ServiceAccountCredentials(token=token)
+    workspace = daemon.authenticate(creds)
+    filespace = workspace.link_filespace(name=filespace_name)
+    try:
+        if not filespace.connect.are_data_stores_available():
+            raise RuntimeError("Connect requires filespace version V9+")
+
+        config = lucidlink.S3DataStoreConfig(
+            access_key=access,
+            secret_key=secret,
+            bucket_name=bucket,
+            region=region,
+            endpoint=endpoint,                # full URL, or "" for AWS S3
+            use_virtual_addressing=False,
+        )
+        filespace.connect.add_data_store("my-store", config)
+        filespace.sync_all()
+
+        # Link an object
+        filespace.connect.link_file(
+            file_path="/datasets/train.csv",
+            data_store_name="my-store",
+            object_id="datasets/v2/train.csv",
+        )
+        filespace.sync_all()
+
+        # Inspect
+        result = filespace.connect.list_external_files("my-store", limit=50)
+        print(f"{len(result.file_paths)} linked files, has_more={result.has_more}")
+
+        # Cleanup
+        filespace.connect.unlink_file("/datasets/train.csv")
+        filespace.sync_all()
+        filespace.connect.remove_data_store("my-store")
+        filespace.sync_all()
+    finally:
+        filespace.unlink()
+finally:
+    daemon.stop()
 ```
 
-### Chunked Reading (Large Files)
+See chunk 05 for full Connect reference.
+
+---
+
+## 05 — fsspec operations (`05_fsspec_operations.py`)
+
+Use the SDK as a normal fsspec filesystem. No explicit daemon code —
+everything is driven by `storage_options`.
 
 ```python
-with filespace.open("/large_file.bin", "rb") as f:
-    while True:
-        chunk = f.read(1024 * 1024)  # 1MB chunks
-        if not chunk:
-            break
-        process(chunk)
-```
+import os
+import fsspec
 
-### Seek & Random Access
+token     = os.environ["LUCIDLINK_SA_TOKEN"]
+workspace = os.environ["LUCIDLINK_WORKSPACE"]
+filespace = os.environ["LUCIDLINK_FILESPACE"]
 
-```python
-with filespace.open("/data.bin", "rb") as f:
-    f.seek(100)             # Jump to byte 100
-    header = f.read(50)     # Read 50 bytes
-    pos = f.tell()          # pos = 150
-    f.seek(-10, 2)          # 10 bytes before end
-    tail = f.read()         # Read to end
-```
+fs = fsspec.filesystem("lucidlink", token=token)
 
-### Append Mode
+base = f"lucidlink://{workspace}/{filespace}"
+fs.makedirs(f"{base}/fsspec_demo", exist_ok=True)
 
-```python
-with filespace.open("/log.txt", "ab") as f:
-    f.write(b"2025-01-15 10:30:00 Event occurred\n")
+with fs.open(f"{base}/fsspec_demo/hello.txt", "wb") as f:
+    f.write(b"hello from fsspec")
+
+info = fs.info(f"{base}/fsspec_demo/hello.txt")
+print(info["size"], info["type"])
+
+print(fs.exists(f"{base}/fsspec_demo/hello.txt"))
+print(fs.isfile(f"{base}/fsspec_demo/hello.txt"))
+
+for entry in fs.ls(f"{base}/fsspec_demo", detail=True):
+    print(entry["name"], entry["size"], entry["type"])
+
+fs.mv(
+    f"{base}/fsspec_demo/hello.txt",
+    f"{base}/fsspec_demo/hello_renamed.txt",
+)
+
+fs.rm(f"{base}/fsspec_demo", recursive=True)
+fs.close()
+
+# URL form with fsspec.open()
+with fsspec.open(
+    f"{base}/quick.txt", "wb", token=token,
+) as f:
+    f.write(b"quick write via fsspec.open()")
 ```
 
 ---
 
-## Pandas Integration (streaming_with_pandas.py)
+## 06 — fsspec + pandas (`06_fsspec_integration.py`)
 
-### CSV
+Two equivalent approaches to reading/writing Parquet/CSV/JSON Lines.
+
+### Approach 1 — direct SDK, pass the file handle to pandas
 
 ```python
+import lucidlink
 import pandas as pd
 
-# Read CSV via streaming
-with filespace.open("/data.csv", "rb") as f:
-    df = pd.read_csv(f)
+DEMO = "/pandas_demo"
 
-# Write CSV
-with filespace.open("/output.csv", "wb") as f:
-    df.to_csv(f, index=False)
+daemon = lucidlink.create_daemon()
+daemon.start()
+try:
+    creds = lucidlink.ServiceAccountCredentials(token=token)
+    workspace = daemon.authenticate(creds)
+    with workspace.link_filespace(name=filespace_name) as filespace:
+        filespace.fs.create_dir(DEMO)
+
+        df = pd.DataFrame({"a": range(5), "b": list("abcde")})
+
+        # CSV
+        with filespace.fs.open(f"{DEMO}/data.csv", "w") as f:
+            df.to_csv(f, index=False)
+        with filespace.fs.open(f"{DEMO}/data.csv", "r") as f:
+            loaded = pd.read_csv(f)
+
+        # Parquet — binary mode is required
+        with filespace.fs.open(f"{DEMO}/data.parquet", "wb") as f:
+            df.to_parquet(f, engine="pyarrow", compression="snappy")
+        with filespace.fs.open(f"{DEMO}/data.parquet", "rb") as f:
+            loaded = pd.read_parquet(f, engine="pyarrow")
+
+        # JSON Lines
+        with filespace.fs.open(f"{DEMO}/data.jsonl", "w") as f:
+            df.to_json(f, orient="records", lines=True)
+        with filespace.fs.open(f"{DEMO}/data.jsonl", "r") as f:
+            loaded = pd.read_json(f, orient="records", lines=True)
+
+        # Chunked CSV
+        with filespace.fs.open(f"{DEMO}/data.csv", "r") as f:
+            for chunk in pd.read_csv(f, chunksize=2):
+                print(chunk.shape)
+
+        filespace.fs.delete_dir(DEMO, recursive=True)
+finally:
+    daemon.stop()
 ```
 
-### Parquet
+### Approach 2 — URL-based, no daemon code
 
 ```python
-# Read Parquet
-with filespace.open("/data.parquet", "rb") as f:
-    df = pd.read_parquet(f)
-
-# Write Parquet
-with filespace.open("/output.parquet", "wb") as f:
-    df.to_parquet(f, index=False)
-```
-
-### Excel
-
-```python
-# Read Excel
-with filespace.open("/report.xlsx", "rb") as f:
-    df = pd.read_excel(f)
-```
-
-### Chunked Processing
-
-```python
-# Process large CSV in chunks
-with filespace.open("/big_data.csv", "rb") as f:
-    for chunk_df in pd.read_csv(f, chunksize=10000):
-        result = chunk_df.groupby("category").sum()
-        # Process each chunk
-```
-
-### JSON Lines
-
-```python
-# Read JSON Lines
-with filespace.open("/events.jsonl", "rb") as f:
-    df = pd.read_json(f, lines=True)
-
-# Write JSON Lines
-with filespace.open("/output.jsonl", "wb") as f:
-    df.to_json(f, orient="records", lines=True)
-```
-
----
-
-## Pandas via fsspec (URL-based)
-
-```python
+import fsspec
 import pandas as pd
 
-storage_options = {"token": "sa_live:..."}
+storage_opts = {"token": token}
+base = f"lucidlink://{workspace}/{filespace}/pandas_url_demo"
 
-# Direct URL-based access — no manual open() needed
-df = pd.read_csv("lucidlink://workspace/filespace/data.csv",
-                  storage_options=storage_options)
+df = pd.DataFrame({"a": range(5), "b": list("abcde")})
 
-df.to_parquet("lucidlink://workspace/filespace/output.parquet",
-              storage_options=storage_options)
+df.to_csv(f"{base}/data.csv", index=False, storage_options=storage_opts)
+pd.read_csv(f"{base}/data.csv", storage_options=storage_opts)
+
+df.to_parquet(f"{base}/data.parquet", index=False, storage_options=storage_opts)
+pd.read_parquet(f"{base}/data.parquet", storage_options=storage_opts)
+
+df.to_json(f"{base}/data.jsonl", orient="records", lines=True,
+           storage_options=storage_opts)
+pd.read_json(f"{base}/data.jsonl", orient="records", lines=True,
+             storage_options=storage_opts)
+
+# Cleanup
+fsspec.filesystem("lucidlink", **storage_opts).rm(base, recursive=True)
 ```
 
 ---
 
-## AI/ML Integration (streaming_with_ai_ml.py)
+## `llconnect` reference tool
 
-### PyTorch Custom Dataset
-
-```python
-import torch
-from torch.utils.data import Dataset, DataLoader
-
-class LucidLinkDataset(Dataset):
-    def __init__(self, filespace, data_dir):
-        self.filespace = filespace
-        entries = filespace.read_dir(data_dir)
-        self.files = [e['path'] for e in entries if not e['is_directory']]
-
-    def __len__(self):
-        return len(self.files)
-
-    def __getitem__(self, idx):
-        with self.filespace.open(self.files[idx], "rb") as f:
-            data = torch.load(f)
-        return data
-
-# Usage
-dataset = LucidLinkDataset(filespace, "/training_data")
-loader = DataLoader(dataset, batch_size=32, num_workers=0)
-for batch in loader:
-    train_step(batch)
-```
-
-### Model Checkpoint Save/Load
-
-```python
-import torch
-
-# Save model
-with filespace.open("/models/checkpoint.pt", "wb") as f:
-    torch.save({
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'loss': loss,
-    }, f)
-
-# Load model
-with filespace.open("/models/checkpoint.pt", "rb") as f:
-    checkpoint = torch.load(f)
-    model.load_state_dict(checkpoint['model_state_dict'])
-```
-
-### NumPy Arrays
-
-```python
-import numpy as np
-import io
-
-# Save array
-with filespace.open("/arrays/data.npy", "wb") as f:
-    np.save(f, my_array)
-
-# Load array
-with filespace.open("/arrays/data.npy", "rb") as f:
-    array = np.load(f)
-```
-
-### LangChain Document Loading
-
-```python
-from langchain.schema import Document
-
-# Load documents for RAG
-with filespace.open("/docs/knowledge.txt", "rt", encoding="utf-8") as f:
-    content = f.read()
-    doc = Document(page_content=content, metadata={"source": "knowledge.txt"})
-```
-
-### Hugging Face Tokenizer
-
-```python
-from transformers import AutoTokenizer
-
-tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-
-with filespace.open("/text/corpus.txt", "rt", encoding="utf-8") as f:
-    text = f.read()
-    tokens = tokenizer(text, return_tensors="pt")
-```
-
----
-
-## LLConnect CLI
-
-Command-line tool built on top of the SDK for managing external data stores and linked files.
-
-### Store Management
-
-```bash
-# Create S3 data store
-llconnect create-store --token sa_live:... --filespace fs.ws \
-    --bucket my-bucket --region us-east-1 \
-    --access-key AKIA... --secret-key ...
-
-# List stores
-llconnect list-stores --token sa_live:... --filespace fs.ws
-
-# Remove store
-llconnect remove-store --token sa_live:... --filespace fs.ws --name my-store
-
-# Rotate credentials
-llconnect rekey-store --token sa_live:... --filespace fs.ws --name my-store \
-    --access-key AKIA_NEW... --secret-key ...
-
-# Cleanup empty/stale stores
-llconnect cleanup-stores --token sa_live:... --filespace fs.ws
-```
-
-### File Operations
-
-```bash
-# Link single S3 object
-llconnect link --token sa_live:... --path lucidlink://ws/fs/data.csv \
-    --object-key path/to/data.csv
-
-# Unlink file
-llconnect unlink --token sa_live:... --path lucidlink://ws/fs/data.csv
-
-# Mirror entire S3 prefix
-llconnect mirror --token sa_live:... --path lucidlink://ws/fs/ \
-    --prefix "dataset/"
-```
+The upstream examples repository includes `tools/llconnect/` (with
+`tools/llconnect.py`) — a reference command-line wrapper around the Connect
+APIs documented in chunk 05. See the upstream repository for current usage.

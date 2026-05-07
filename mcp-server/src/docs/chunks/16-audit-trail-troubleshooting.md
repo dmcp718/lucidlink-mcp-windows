@@ -7,7 +7,7 @@
 3. **OpenSearch healthy?** — `curl http://localhost:9200/_cluster/health`
 4. **Dashboards reachable?** — http://localhost:5601
 5. **Filespace mounted?** — check mount point has `.lucid_audit` directory
-6. **Events flowing?** — `count_audit_events(group_by: "time", time_range: "1h")`
+6. **Events flowing?** — `query_audit_events(mode: "aggregate", group_by: "time", time_range: "1h")`
 
 ## Common issues
 
@@ -52,7 +52,7 @@ Start Docker Desktop. On Linux: `sudo systemctl start docker`.
 
 1. Verify the index pattern exists: Stack Management > Index Patterns > `audit-trail*`
 2. Check time range — adjust the time picker to include when events occurred
-3. Verify events exist: `search_audit_events()` with no filters
+3. Verify events exist: `query_audit_events(mode: "search")` with no filters
 4. If using multi-filespace, check index name matches pattern
 
 ### Queries return no results

@@ -1,6 +1,7 @@
 /**
  * High-level Connect workflow helpers.
- * ensure_folder_path, import_s3_object, bulk_import_s3_objects
+ * ensure_folder_path, import_s3_object, bulk_import_s3_objects,
+ * link_http_file, bulk_link_http_files.
  */
 import { ApiClient, ApiResponse } from "../shared/api-client.js";
 
@@ -147,6 +148,92 @@ export async function bulkImportS3Objects(
     } else {
       result.failed++;
       result.objectFailures.push({ s3Key: obj.s3_key, llPath: obj.ll_path, error: res.error ?? "Unknown error" });
+      if (stopOnError) break;
+    }
+  }
+
+  return result;
+}
+
+// ── HTTP link files (no data store, just a URL) ──
+
+export async function linkHttpFile(
+  client: ApiClient,
+  filespaceId: string,
+  url: string,
+  llPath: string,
+): Promise<ApiResponse> {
+  const pathParts = llPath.replace(/^\/+/, "").split("/");
+  if (pathParts.length > 1) {
+    const dirPath = "/" + pathParts.slice(0, -1).join("/");
+    const folderResult = await ensureFolderPath(client, filespaceId, dirPath);
+    if (!folderResult.ok) {
+      return { success: false, error: `Directory creation failed for '${dirPath}': ${folderResult.error}` };
+    }
+  }
+
+  return client.createExternalEntry(filespaceId, {
+    path: llPath,
+    kind: "HttpLinkFile",
+    httpFileParams: { url },
+  });
+}
+
+export interface BulkHttpLink {
+  url: string;
+  ll_path: string;
+}
+
+export interface BulkHttpResult {
+  total: number;
+  succeeded: number;
+  failed: number;
+  dirFailures: { dir: string; error: string }[];
+  linkFailures: { url: string; llPath: string; error: string }[];
+}
+
+export async function bulkLinkHttpFiles(
+  client: ApiClient,
+  filespaceId: string,
+  items: BulkHttpLink[],
+  stopOnError = false,
+): Promise<BulkHttpResult> {
+  const result: BulkHttpResult = {
+    total: items.length,
+    succeeded: 0,
+    failed: 0,
+    dirFailures: [],
+    linkFailures: [],
+  };
+
+  const dirs = new Set<string>();
+  for (const item of items) {
+    const parts = item.ll_path.replace(/^\/+/, "").split("/");
+    if (parts.length > 1) {
+      dirs.add("/" + parts.slice(0, -1).join("/"));
+    }
+  }
+
+  for (const dir of Array.from(dirs).sort()) {
+    const folderResult = await ensureFolderPath(client, filespaceId, dir);
+    if (!folderResult.ok) {
+      result.dirFailures.push({ dir, error: folderResult.error });
+      if (stopOnError) return result;
+    }
+  }
+
+  for (const item of items) {
+    const res = await client.createExternalEntry(filespaceId, {
+      path: item.ll_path,
+      kind: "HttpLinkFile",
+      httpFileParams: { url: item.url },
+    });
+
+    if (res.success) {
+      result.succeeded++;
+    } else {
+      result.failed++;
+      result.linkFailures.push({ url: item.url, llPath: item.ll_path, error: res.error ?? "Unknown error" });
       if (stopOnError) break;
     }
   }

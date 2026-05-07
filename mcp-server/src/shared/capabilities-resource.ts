@@ -148,8 +148,8 @@ Manages the audit trail Docker Compose stack (OpenSearch + Dashboards + Fluent B
 
 Tools:
   discover_filespace_mounts, setup_audit_trail, start_audit_trail, stop_audit_trail,
-  audit_trail_status, search_audit_events, count_audit_events, get_user_activity,
-  get_file_history, run_opensearch_query, create_audit_alert, list_audit_alerts,
+  audit_trail_status, query_audit_events (mode: search | user_activity | file_history | aggregate),
+  run_opensearch_query, create_audit_alert, list_audit_alerts,
   delete_audit_alert, setup_slack_webhook, get_audit_trail_schema
 
 SERVER 6: lucidlink-python-sdk (Python SDK documentation)

@@ -1,6 +1,6 @@
 {
   "name": "@lucidlink/mcp-server",
-  "version": "2.2.0",
+  "version": "2.3.1",
   "description": "LucidLink MCP servers — cross-platform filespace management via Claude Desktop",
   "type": "module",
   "engines": {
@@ -19,6 +19,7 @@
     "dist/",
     "src/docs/chunks/",
     "src/python-sdk/chunks/",
+    "src/search/",
     "mcp-servers.json"
   ],
   "scripts": {

@@ -18,6 +18,8 @@ import {
   ensureFolderPath,
   importS3Object,
   bulkImportS3Objects,
+  linkHttpFile,
+  bulkLinkHttpFiles,
 } from "./connect/workflow-tools.js";
 import { generateConnectUI, GeneratedProject } from "./connect/ui-template.js";
 import { registerBrandResource } from "./shared/brand-resource.js";
@@ -29,47 +31,71 @@ const CONNECT_WORKFLOW_GUIDE = `LucidLink Connect MCP Server — Workflow Guide
 =============================================
 
 WHAT IS LUCIDLINK CONNECT?
-LucidLink Connect links existing S3 objects into a filespace as read-only "external entries"
-without copying data. S3 credentials need only s3:GetObject permission.
+LucidLink Connect links existing external files into a filespace as read-only "external entries"
+without copying data.
 
-TWO-PART SYSTEM:
-- Data Stores — S3 bucket connection credentials (stored per-filespace, encrypted)
-- External Entries — filespace metadata records pointing to individual S3 objects
+TWO KINDS OF EXTERNAL ENTRY:
+- SingleObjectFile — backed by an S3 object via a LucidLink-managed Data Store.
+                     LucidLink presigns the URLs on the user's behalf.
+- HttpLinkFile     — backed by any HTTP/HTTPS URL. No Data Store needed.
+                     The user/automation supplies and rotates the URL.
+                     Requires LucidLink API v1.4.3+.
 
-QUICKSTART (3 steps):
-  Step 1: Create a data store
+PATH 1 — S3 OBJECT (with Data Store)
+  Step 1: Create a data store (S3 credentials, stored per-filespace, encrypted)
     tool: create_data_store
     required: filespace_id, name, access_key, secret_key, bucket_name, use_virtual_addressing
 
-  Step 2: Ensure folder structure exists (use high-level tool)
+  Step 2: Ensure folder structure exists
     tool: ensure_folder_path
-    required: filespace_id, path (e.g. "/videos/2024")
 
   Step 3: Link S3 objects
-    tool: import_s3_object (one at a time)
+    tool: import_s3_object  (one at a time)
       OR
-    tool: bulk_import_s3_objects (many at once)
+    tool: bulk_import_s3_objects  (many at once)
+
+PATH 2 — HTTP LINK (no Data Store)
+  Step 1: Ensure folder structure exists
+    tool: ensure_folder_path
+
+  Step 2: Link an HTTP/HTTPS URL
+    tool: link_http_file   (one at a time)
+      OR
+    tool: bulk_link_http_files   (many at once)
+      OR primitive: create_http_link
+
+  Rotating an expiring URL: use update_http_link_url (PATCH) with the entry_id
+  returned by create_http_link / link_http_file.
+
+  HTTP URL requirements:
+    - Direct asset URL (not a webpage that embeds the file).
+    - Server must return Content-Length and Range headers.
+    - LucidLink does NOT renew or re-sign URLs — rotation is your job.
 
 HIGH-LEVEL WORKFLOW TOOLS (recommended):
-  - ensure_folder_path   — creates /a/b/c directory hierarchy in one call
-  - import_s3_object     — ensures dirs + links one S3 object
-  - bulk_import_s3_objects — ensures dirs + links many objects, reports results
-  - create_connect_ui  — generates a browser-based import UI (no Claude needed)
+  - ensure_folder_path        — creates /a/b/c directory hierarchy in one call
+  - import_s3_object          — ensures dirs + links one S3 object (SingleObjectFile)
+  - bulk_import_s3_objects    — ensures dirs + links many S3 objects
+  - link_http_file            — ensures dirs + links one HTTP URL (HttpLinkFile)
+  - bulk_link_http_files      — ensures dirs + links many HTTP URLs
+  - create_connect_ui         — generates a browser-based import UI
 
 PRIMITIVE API TOOLS (for fine-grained control):
-  Entries:         create_entry, resolve_entry, get_entry, delete_entry, list_entry_children
-  Data Stores:     create_data_store, list_data_stores, get_data_store, update_data_store, delete_data_store
-  External Entries: create_external_entry, list_external_entry_ids, delete_external_entry
+  Entries:          create_entry, resolve_entry, get_entry, delete_entry, list_entry_children
+  Data Stores:      create_data_store, list_data_stores, get_data_store, update_data_store, delete_data_store
+  External Entries: create_external_entry (S3), create_http_link, update_http_link_url,
+                    list_external_entry_ids, delete_external_entry
 
 LIMITATIONS:
   - Read-only (external entries cannot be written to)
-  - Individual object linking (no bucket-level mount)
-  - S3 only (other clouds planned)
-  - Delete removes filespace entry only (not S3 object)
+  - Individual file/object linking (no bucket-level or folder-level mount)
+  - SingleObjectFile is S3-only; HttpLinkFile works with any HTTP/HTTPS server
+  - Delete removes the filespace entry only (not the underlying object/URL target)
   - Copy creates a native LucidLink file (no longer external)
 
-ROTATING CREDENTIALS:
-  Use update_data_store with new access_key + secret_key (PATCH endpoint)
+ROTATING CREDENTIALS / URLS:
+  - S3 data store: update_data_store with new access_key + secret_key
+  - HTTP link URL: update_http_link_url with new url
 
 COMMON ERRORS:
   409 on create_entry -> folder already exists, use resolve_entry to get its ID
@@ -104,16 +130,26 @@ async function ensureReady(): Promise<string | null> {
 // ── Server ──
 
 const server = new McpServer(
-  { name: "lucidlink-connect-api", version: "2.1.0" },
-  { instructions: `LucidLink Connect API server — links existing S3 objects into filespaces as read-only external entries.
+  { name: "lucidlink-connect-api", version: "2.3.1" },
+  { instructions: `LucidLink Connect API server — links existing external files into filespaces as read-only external entries.
 
 The LucidLink API runs as a self-hosted Docker container (lucidlink/lucidlink-api on DockerHub).
 Configure the API URL via LUCIDLINK_API_URL env var (default: http://localhost:3003/api/v1).
 Set your bearer token via LUCIDLINK_BEARER_TOKEN env var or in ~/.lucidlink/mcp-config.json.
 
+Two kinds of external entry:
+  - SingleObjectFile — S3 object via a LucidLink-managed Data Store
+                       (LucidLink presigns URLs for the user)
+  - HttpLinkFile     — any HTTP/HTTPS URL (no Data Store; user owns URL rotation,
+                       requires LucidLink API v1.4.3+)
+
 Use get_connect_workflow_guide for a complete quickstart.
-Typical workflow: create_data_store → ensure_folder_path → bulk_import_s3_objects
-For a web UI: use create_connect_ui (generates a complete app — never build manually).
+Typical S3 workflow:    create_data_store → ensure_folder_path → bulk_import_s3_objects.
+Typical HTTP workflow:  ensure_folder_path → link_http_file (or bulk_link_http_files).
+URL rotation for HTTP links: update_http_link_url.
+
+Use create_connect_ui when the user asks to create, generate, build, or launch a UI, interface,
+dashboard, or app for LucidLink Connect — always use it instead of building a UI manually.
 
 Connection check (check_api_connection) is on the lucidlink-api server.` },
 );
@@ -132,7 +168,7 @@ server.tool(
 
 server.tool(
   "create_connect_ui",
-  "REQUIRED when user asks to create, generate, build, or launch a UI, interface, dashboard, or app for LucidLink Connect. This tool generates a complete ready-to-use web application with S3 browser — do NOT build a UI manually, always use this tool instead. It writes files, installs dependencies, starts the server, and opens the browser automatically.",
+  "Generate a Connect web UI (S3 browser). Writes files, runs npm install, starts the server, opens the browser. Returns the running URL.",
   {
     filespace_id: z.string().optional().describe("Pre-fill filespace ID"),
     data_store_id: z.string().optional().describe("Pre-fill data store ID"),
@@ -504,6 +540,52 @@ server.tool(
   },
 );
 
+// ── HTTP Link File Tools (kind: HttpLinkFile, no data store) ──
+
+server.tool(
+  "create_http_link",
+  "Create an HTTP link file entry. Links an external URL into the filespace as a read-only file. No data store required. Requires LucidLink API v1.4.3+.",
+  {
+    filespace_id: z.string().describe("Filespace ID"),
+    path: z.string().describe("Filespace path (e.g. /reports/dataset.csv)"),
+    url: z.string().describe("HTTP or HTTPS URL of the file. Server must support Content-Length and Range headers."),
+  },
+  async ({ filespace_id, path, url }) => {
+    const startErr = await ensureReady();
+    if (startErr) return err(formatError("Create HTTP Link", startErr));
+
+    const res = await getClient().createExternalEntry(filespace_id, {
+      path,
+      kind: "HttpLinkFile",
+      httpFileParams: { url },
+    });
+    return res.success
+      ? ok(formatSuccess(`Linked HTTP file at '${path}'`, res.data ?? {}))
+      : err(formatError("Create HTTP Link", res.error ?? "Unknown error"));
+  },
+);
+
+server.tool(
+  "update_http_link_url",
+  "Rotate the URL behind an existing HTTP link file entry (PATCH). Useful for refreshing pre-signed URLs before they expire. Only entries with kind=HttpLinkFile can be patched this way.",
+  {
+    filespace_id: z.string().describe("Filespace ID"),
+    entry_id: z.string().describe("HTTP link entry ID (returned from create_http_link)"),
+    url: z.string().describe("New HTTP or HTTPS URL"),
+  },
+  async ({ filespace_id, entry_id, url }) => {
+    const startErr = await ensureReady();
+    if (startErr) return err(formatError("Update HTTP Link URL", startErr));
+
+    const res = await getClient().patchExternalEntry(filespace_id, entry_id, {
+      httpFileParams: { url },
+    });
+    return res.success
+      ? ok(formatSuccess(`Updated HTTP link URL for entry ${entry_id}`, res.data ?? {}))
+      : err(formatError("Update HTTP Link URL", res.error ?? "Unknown error"));
+  },
+);
+
 // ── High-Level Workflow Tools ──
 
 server.tool(
@@ -572,6 +654,57 @@ server.tool(
     }
     return err(
       `Bulk Import completed with errors: ${result.succeeded} succeeded, ${result.failed} failed\n\n` +
+      JSON.stringify(result, null, 2),
+    );
+  },
+);
+
+server.tool(
+  "link_http_file",
+  "Ensure directory path exists, then link an HTTP/HTTPS URL as an external file entry. No data store needed. Requires LucidLink API v1.4.3+.",
+  {
+    filespace_id: z.string().describe("Filespace ID"),
+    url: z.string().describe("HTTP or HTTPS URL (server must support Content-Length and Range headers)"),
+    ll_path: z.string().describe("Full filespace path (e.g. /reports/dataset.csv)"),
+  },
+  async ({ filespace_id, url, ll_path }) => {
+    const startErr = await ensureReady();
+    if (startErr) return err(formatError("Link HTTP File", startErr));
+
+    const res = await linkHttpFile(getClient(), filespace_id, url, ll_path);
+    return res.success
+      ? ok(formatSuccess(`Linked '${url}' -> '${ll_path}'`, res.data ?? {}))
+      : err(formatError("Link HTTP File", res.error ?? "Unknown error"));
+  },
+);
+
+server.tool(
+  "bulk_link_http_files",
+  "Ensure all directories exist, then link multiple HTTP URLs as external file entries (no data store).",
+  {
+    filespace_id: z.string().describe("Filespace ID"),
+    items: z.array(z.object({
+      url: z.string().describe("HTTP or HTTPS URL"),
+      ll_path: z.string().describe("Target filespace path"),
+    })).describe("List of URL → filespace-path links"),
+    stop_on_error: z.boolean().optional().describe("Stop on first error (default false)"),
+  },
+  async ({ filespace_id, items, stop_on_error }) => {
+    const startErr = await ensureReady();
+    if (startErr) return err(formatError("Bulk Link HTTP Files", startErr));
+
+    const result = await bulkLinkHttpFiles(
+      getClient(), filespace_id, items, stop_on_error ?? false,
+    );
+
+    if (result.failed === 0 && result.dirFailures.length === 0) {
+      return ok(formatSuccess(
+        `Bulk HTTP Link: ${result.succeeded}/${result.total} files linked`,
+        result as unknown as Record<string, unknown>,
+      ));
+    }
+    return err(
+      `Bulk HTTP Link completed with errors: ${result.succeeded} succeeded, ${result.failed} failed\n\n` +
       JSON.stringify(result, null, 2),
     );
   },

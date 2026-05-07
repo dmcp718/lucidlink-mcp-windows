@@ -196,6 +196,9 @@ export class ApiClient {
   createExternalEntry(filespaceId: string, data: Record<string, unknown>) {
     return this.request("POST", `/filespaces/${filespaceId}/external/entries`, { data });
   }
+  patchExternalEntry(filespaceId: string, entryId: string, data: Record<string, unknown>) {
+    return this.request("PATCH", `/filespaces/${filespaceId}/external/entries/${entryId}`, { data });
+  }
   listExternalEntryIds(filespaceId: string, opts: { dataStoreId?: string; limit?: number; nextCursor?: string } = {}) {
     const params: Record<string, string> = {};
     if (opts.dataStoreId) params.dataStoreId = opts.dataStoreId;

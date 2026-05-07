@@ -1,193 +1,302 @@
 # LucidLink Python SDK — Models & Exceptions
 
-## Data Models
+**Version:** 0.8.10
 
-**Module:** `lucidlink.models`
+The `lucidlink` package re-exports every model and exception at the top
+level. The authoritative home modules for the dataclasses and enums
+documented below are:
 
-### FileEntry
+- `lucidlink.filespace_models` — `FilespaceInfo`, `DaemonStatus`, `SyncMode`
+- `lucidlink.filesystem_models` — `DirEntry`, `FilespaceSize`, `FilespaceStatistics`
+- `lucidlink.connect_models` — `S3DataStoreConfig`, `S3Credentials`, `DataStoreCredentials`, `DataStoreInfo`, `DataStoreKind`, `DataStoreRekeyState`, `LinkedFilesResult`
+- `lucidlink.storage` — `StorageConfig`, `StorageMode`
+- `lucidlink.exceptions` — all exception types
+
+(Connect-specific models are covered in chunk 05; the Connect classes are
+listed here only to confirm their import paths.)
+
+---
+
+## Filesystem models
+
+### DirEntry
+
+**Module:** `lucidlink.filesystem_models` (re-exported as `lucidlink.DirEntry`)
+
+Returned by `Filesystem.read_dir()` and `Filesystem.get_entry()`. The 0.8.10
+SDK uses `DirEntry` throughout — there is no `FileEntry` class.
 
 ```python
-@dataclass
-class FileEntry:
-    name: str                          # File/directory name
-    path: str                          # Full path
-    size: int                          # Size in bytes
-    is_directory: bool                 # True if directory
-    is_link: bool                      # True if symbolic link
-    modified_time: int                 # Unix timestamp
-    file_id: Optional[str] = None     # Unique identifier
-    created_time: Optional[int] = None # Unix timestamp
+DirEntry(
+    name: str,
+    size: int,
+    type: str,              # "file" | "dir" | "link" | "unknown"
+    file_id: str,
+    file_id_external: int,  # non-zero for Connect-linked files
+    ctime: int,             # Unix timestamp
+    mtime: int,             # Unix timestamp
+)
+```
+
+**Predicate methods:**
+
+| Method | Description |
+|--------|-------------|
+| `is_file() -> bool` | True when `type == "file"` |
+| `is_dir() -> bool` | True when `type == "dir"` |
+| `is_link() -> bool` | True when `type == "link"` |
+
+Usage:
+
+```python
+for entry in filespace.fs.read_dir("/"):
+    kind = "dir" if entry.is_dir() else "file"
+    external = " (external)" if entry.file_id_external else ""
+    print(f"{entry.name} [{kind}] {entry.size} bytes{external}")
 ```
 
 ### FilespaceSize
 
-```python
-@dataclass
-class FilespaceSize:
-    total_bytes: int                   # Total capacity
-    used_bytes: int                    # Used space
-    available_bytes: int               # Available space
+**Module:** `lucidlink.filesystem_models` (re-exported as
+`lucidlink.FilespaceSize`).
 
-    @property
-    def used_percentage(self) -> float:
-        """Percentage of space used (0-100)."""
+Returned by `Filesystem.get_size()`.
+
+```python
+FilespaceSize(
+    entries: int,              # Metadata entry bytes
+    data: int,                 # File data bytes
+    storage: int,              # Total storage bytes used
+    external_files_size: int,  # Connect-linked data bytes
+    external_files_count: int, # Number of Connect-linked files
+)
 ```
 
-Usage:
 ```python
-size = filespace.get_filespace_size()
-print(f"Total: {size.total_bytes}")
-print(f"Used: {size.used_bytes} ({size.used_percentage:.1f}%)")
-print(f"Available: {size.available_bytes}")
+size = filespace.fs.get_size()
+print(f"Entries: {size.entries}  Data: {size.data}  Storage: {size.storage}")
+print(f"External: {size.external_files_count} files / {size.external_files_size} bytes")
 ```
 
 ### FilespaceStatistics
 
+**Module:** `lucidlink.filesystem_models` (re-exported as
+`lucidlink.FilespaceStatistics`).
+
+Returned by `Filesystem.get_statistics()`.
+
 ```python
-@dataclass
-class FilespaceStatistics:
-    file_count: int                    # Total number of files
-    directory_count: int               # Total number of directories
-    total_size: int                    # Total size in bytes
+FilespaceStatistics(
+    file_count: int,
+    directory_count: int,
+    symlink_count: int,
+    entries_size: int,
+    data_size: int,
+    storage_size: int,
+    external_files_size: int,
+    external_files_count: int,
+)
 ```
 
-Usage:
 ```python
-stats = filespace.get_filespace_statistics()
-print(f"Files: {stats.file_count}, Dirs: {stats.directory_count}")
-print(f"Total size: {stats.total_size} bytes")
+stats = filespace.fs.get_statistics()
+print(f"Files: {stats.file_count}, Dirs: {stats.directory_count}, Links: {stats.symlink_count}")
+print(f"Data: {stats.data_size} bytes, Storage: {stats.storage_size} bytes")
 ```
 
 ---
 
-## Exception Hierarchy
+## Filespace / daemon models
+
+### FilespaceInfo
+
+**Module:** `lucidlink.filespace_models` (re-exported as
+`lucidlink.FilespaceInfo`).
+
+Returned by `Workspace.list_filespaces()`.
+
+```python
+FilespaceInfo(
+    id: str,       # Unique filespace identifier
+    name: str,     # Human-readable name
+    created: str,  # ISO-8601 timestamp
+)
+```
+
+### DaemonStatus
+
+**Module:** `lucidlink.filespace_models` (re-exported as
+`lucidlink.DaemonStatus`).
+
+Dataclass representing daemon operational state.
+
+```python
+DaemonStatus(
+    is_running: bool,
+    is_authenticated: bool,
+    is_linked: bool,
+    root_path: str,
+)
+```
+
+### SyncMode
+
+**Module:** `lucidlink.filespace_models` (re-exported as
+`lucidlink.SyncMode`). A `str`-based `Enum` that controls automatic
+syncing when a filespace is unlinked.
+
+| Member | Value | Meaning |
+|--------|-------|---------|
+| `SyncMode.SYNC_ALL` | `"all"` | Default — call `sync_all()` before `unlink()` |
+| `SyncMode.SYNC_NONE` | `"none"` | Caller must call `sync_all()` explicitly |
+
+Pass via `Workspace.link_filespace(..., sync_mode=...)` or as a
+`storage_options` key for the fsspec filesystem.
+
+---
+
+## Storage models
+
+### StorageMode
+
+**Module:** `lucidlink.storage` (re-exported as `lucidlink.StorageMode`).
+A standard `Enum`.
+
+| Member | Value |
+|--------|-------|
+| `StorageMode.SANDBOXED` | `"sandboxed"` |
+| `StorageMode.PHYSICAL` | `"physical"` |
+
+### StorageConfig
+
+**Module:** `lucidlink.storage` (re-exported as `lucidlink.StorageConfig`).
+
+```python
+StorageConfig(
+    mode: StorageMode = StorageMode.SANDBOXED,
+    persist_on_exit: bool = False,
+    root_path: pathlib.Path | None = None,
+)
+```
+
+**Methods:**
+
+| Method | Description |
+|--------|-------------|
+| `get_root_path() -> pathlib.Path` | Root directory where daemon writes per-filespace subdirectories |
+| `should_cleanup() -> bool` | True when files are removed on daemon stop |
+
+Most users should call `lucidlink.create_daemon(...)` instead of building
+`StorageConfig` by hand. See chunk 01 for daemon lifecycle details.
+
+---
+
+## Connect models
+
+The Connect-related classes live in `lucidlink.connect_models` and are
+re-exported at the top level:
+
+| Class | Re-exported? | Chunk |
+|-------|--------------|-------|
+| `S3DataStoreConfig` | yes | 05 |
+| `S3Credentials` | yes | 05 |
+| `DataStoreCredentials` | yes | 05 (alias of `S3Credentials`) |
+| `DataStoreInfo` | yes | 05 |
+| `DataStoreKind` | yes | 05 |
+| `DataStoreRekeyState` | yes | 05 |
+| `LinkedFilesResult` | yes | 05 |
+
+See chunk 05 for field-level documentation and usage examples.
+
+---
+
+## Exception hierarchy
 
 **Module:** `lucidlink.exceptions`
 
-### Custom LucidLink Exceptions
+All exceptions are re-exported at the top level and can be caught as
+`lucidlink.LucidLinkError` (the common base).
 
 ```
-LucidLinkError (base)
-├── DaemonError          — Daemon operation failures (start, stop, config)
-├── FilespaceError       — Filespace operation failures (link, read, write)
-├── AuthenticationError  — Authentication failures (invalid token, expired)
-└── ConfigurationError   — Configuration errors (inherits from ValueError)
+LucidLinkError (base — extends Exception)
+├── DaemonError           — Raised when daemon operations fail
+│                          (e.g. daemon already running, daemon not started,
+│                          daemon initialization failed)
+├── FilespaceError        — Raised when filespace operations fail
+│                          (e.g. filespace not linked, filespace connection failed,
+│                          invalid filespace ID)
+├── AuthenticationError   — Raised when authentication fails. Most authentication
+│                          errors are mapped to Python's PermissionError.
+└── ConfigurationError    — Raised when configuration is invalid.
+                           Inherits from both LucidLinkError and ValueError
+                           for compatibility.
 ```
 
-### Exception Details
-
-#### `LucidLinkError`
-Base exception for all LucidLink SDK errors. Catch this for broad error handling.
+### Examples
 
 ```python
+import lucidlink
+
+# Catch-all
 try:
-    filespace.read_file("/nonexistent")
-except lucidlink.LucidLinkError as e:
-    print(f"SDK error: {e}")
-```
+    filespace.fs.read_file("/missing")
+except lucidlink.LucidLinkError as exc:
+    print(f"SDK error: {exc}")
 
-#### `DaemonError`
-Raised for daemon lifecycle issues — failed start, stop, or configuration.
-
-```python
+# Daemon lifecycle
 try:
     daemon.start()
-except lucidlink.DaemonError as e:
-    print(f"Daemon failed: {e}")
-```
+except lucidlink.DaemonError as exc:
+    print(f"Daemon failed to start: {exc}")
 
-#### `FilespaceError`
-Raised for filespace operations — file not found, permission denied, link failures.
-
-#### `AuthenticationError`
-Raised when authentication fails — invalid token, expired credentials, network issues.
-
-```python
+# Authentication
 try:
     workspace = daemon.authenticate(creds)
-except lucidlink.AuthenticationError as e:
-    print(f"Auth failed: {e}")
+except lucidlink.AuthenticationError as exc:
+    print(f"Invalid or expired token: {exc}")
+
+# Configuration — catchable as ValueError too
+try:
+    daemon = lucidlink.create_daemon(root_path="/bogus/path")
+    daemon.start()
+except lucidlink.ConfigurationError as exc:
+    print(f"Config issue: {exc}")
+except ValueError as exc:
+    # ConfigurationError also subclasses ValueError
+    print(f"Bad value: {exc}")
 ```
 
-#### `ConfigurationError`
-Raised for invalid configuration. Inherits from both `LucidLinkError` and `ValueError`.
+### Mapped Python built-in exceptions
 
-### Mapped Python Built-in Exceptions
+Per the upstream documentation, filesystem operations raise standard Python
+exceptions like `FileNotFoundError`, `PermissionError`, etc. — rather than
+custom variants. Most authentication errors in particular are mapped to
+Python's `PermissionError`.
 
-The C++ exception translator maps native errors to standard Python exceptions:
-
-| Category | Exceptions |
-|----------|-----------|
-| File operations | `FileExistsError`, `FileNotFoundError`, `NotADirectoryError`, `IsADirectoryError`, `PermissionError`, `ValueError` |
-| Authentication | `PermissionError` |
-| Network/IO | `TimeoutError`, `IOError`, `ConnectionError` |
-| Generic | `NotImplementedError`, `OSError`, `RuntimeError` |
-
-### Error Handling Best Practices
+### Recommended catch pattern
 
 ```python
 import lucidlink
 
 try:
-    daemon = lucidlink.create_daemon(sandboxed=True)
+    daemon = lucidlink.create_daemon()
     daemon.start()
     creds = lucidlink.ServiceAccountCredentials(token="sa_live:...")
     workspace = daemon.authenticate(creds)
     filespace = workspace.link_filespace(name="data")
 
-    with filespace.open("/file.csv", "rb") as f:
+    with filespace.fs.open("/file.csv", "rb") as f:
         data = f.read()
 
 except lucidlink.AuthenticationError:
     print("Check your service account token")
-except lucidlink.ConfigurationError as e:
-    print(f"Configuration issue: {e}")
+except lucidlink.ConfigurationError as exc:
+    print(f"Configuration issue: {exc}")
 except FileNotFoundError:
     print("File does not exist in filespace")
-except lucidlink.LucidLinkError as e:
-    print(f"SDK error: {e}")
+except lucidlink.LucidLinkError as exc:
+    print(f"SDK error: {exc}")
 finally:
     daemon.stop()
 ```
 
----
-
-## URL Parser
-
-**Module:** `lucidlink.url_parser`
-
-### ParsedUrl
-
-```python
-@dataclass
-class ParsedUrl:
-    workspace: str     # Workspace name
-    filespace: str     # Filespace name
-    path: str          # File path within filespace
-```
-
-### UrlParser
-
-Parses `lucidlink://workspace/filespace/path/to/file` URLs.
-
-```python
-from lucidlink.url_parser import UrlParser
-
-parsed = UrlParser.parse("lucidlink://myworkspace/myfilespace/data/file.csv")
-# parsed.workspace = "myworkspace"
-# parsed.filespace = "myfilespace"
-# parsed.path = "/data/file.csv"
-```
-
----
-
-## File Modes Utilities
-
-**Module:** `lucidlink.file_modes`
-
-| Function | Description |
-|----------|-------------|
-| `parse_mode(mode: str)` | Parse open mode into components |
-| `is_text_mode(mode: str)` | Check if mode is text mode |
-| `ensure_binary_mode(mode: str)` | Convert to binary equivalent |
-| `get_buffered_wrapper_type(mode: str)` | Get wrapper type: "reader", "writer", or "random" |

@@ -3,8 +3,9 @@
  * LucidLink Python SDK MCP Server
  *
  * 6th MCP server — provides searchable access to the LucidLink Python SDK
- * documentation. 9 doc chunks covering setup, daemon lifecycle, file I/O,
- * Connect, fsspec, models, examples, and performance.
+ * documentation. 12 doc chunks covering setup, daemon lifecycle, file I/O,
+ * Connect, fsspec, models, examples, performance, file locking,
+ * quick reference, and configuration/sync.
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -16,7 +17,7 @@ import { CHUNKS } from "./python-sdk/constants.js";
 import { searchDocs, loadChunk } from "./python-sdk/tools.js";
 
 const server = new McpServer(
-  { name: "lucidlink-python-sdk", version: "2.1.0" },
+  { name: "lucidlink-python-sdk", version: "2.3.1" },
   {
     instructions: `LucidLink Python SDK documentation server.
 
@@ -61,10 +62,12 @@ for (const chunk of CHUNKS) {
   );
 }
 
-// Register SDK search tool
+// Register SDK search tool. By default returns focused snippets (the
+// section enclosing the first match, plus a context window). Pass full=true
+// to get the entire chunk, or read lucidlink-sdk://docs/{id} as a resource.
 server.tool(
   "lucidlink_sdk_search",
-  "Search LucidLink Python SDK documentation by keywords. Returns the most relevant documentation chunks. Use this to find API details, usage examples, and configuration options for the Python SDK.",
+  "Search LucidLink Python SDK documentation. Returns the matched section from each top-ranked chunk (use full=true for the entire chunk).",
   {
     query: z
       .string()
@@ -74,12 +77,16 @@ server.tool(
     max_results: z
       .number()
       .min(1)
-      .max(9)
+      .max(12)
       .default(3)
-      .describe("Maximum chunks to return (1-9, default 3)"),
+      .describe("Maximum chunks to return (1-12, default 3)"),
+    full: z
+      .boolean()
+      .optional()
+      .describe("Return the full chunk text instead of a focused snippet (default false)"),
   },
-  async ({ query, max_results }) => {
-    const results = searchDocs(query, max_results ?? 3);
+  async ({ query, max_results, full }) => {
+    const results = searchDocs(query, max_results ?? 3, full ?? false);
     return {
       content: results.map((r) => ({
         type: "text" as const,

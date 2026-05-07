@@ -29,7 +29,6 @@ function findChunksDir(): string {
 
 const CHUNKS_DIR = findChunksDir();
 
-// Cache loaded chunks
 const chunkCache = new Map<string, string>();
 
 export function loadChunk(filename: string): string {
@@ -39,6 +38,77 @@ export function loadChunk(filename: string): string {
   const content = readFileSync(resolve(CHUNKS_DIR, filename), "utf-8");
   chunkCache.set(filename, content);
   return content;
+}
+
+// Section index: chunk filename -> array of {heading, start, end} byte offsets,
+// where each section spans from a top-level "## ..." heading to the next one
+// (or EOF). Built lazily on first use of a chunk.
+interface Section {
+  heading: string;
+  start: number;
+  end: number;
+}
+const sectionCache = new Map<string, Section[]>();
+
+function getSections(filename: string): Section[] {
+  const cached = sectionCache.get(filename);
+  if (cached) return cached;
+
+  const content = loadChunk(filename);
+  const sections: Section[] = [];
+  // Match "## " at line start (top-level only — not "### " or deeper).
+  const re = /^## +(.+)$/gm;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    sections.push({ heading: m[1].trim(), start: m.index, end: content.length });
+  }
+  for (let i = 0; i < sections.length - 1; i++) {
+    sections[i].end = sections[i + 1].start;
+  }
+  sectionCache.set(filename, sections);
+  return sections;
+}
+
+const CONTEXT_CHARS = 500;
+
+// Extract a focused excerpt around the first match for any query token.
+// Returns the entire enclosing ## section if it's small (<2 KB), or
+// otherwise a window of ±CONTEXT_CHARS around the match within the section.
+function extractSnippet(filename: string, queryTokens: string[]): string {
+  const content = loadChunk(filename);
+  const lower = content.toLowerCase();
+
+  let matchIdx = -1;
+  for (const qt of queryTokens) {
+    const idx = lower.indexOf(qt);
+    if (idx !== -1 && (matchIdx === -1 || idx < matchIdx)) {
+      matchIdx = idx;
+    }
+  }
+  if (matchIdx === -1) {
+    // No literal token match (matched via keyword/heading scoring) — return
+    // the document head so the LLM still gets useful context.
+    return content.slice(0, Math.min(content.length, CONTEXT_CHARS * 4));
+  }
+
+  const sections = getSections(filename);
+  const section = sections.find((s) => matchIdx >= s.start && matchIdx < s.end);
+
+  if (!section) {
+    // Match landed before the first ## heading (preamble).
+    const start = Math.max(0, matchIdx - CONTEXT_CHARS);
+    const end = Math.min(content.length, matchIdx + CONTEXT_CHARS);
+    return content.slice(start, end);
+  }
+
+  const sectionText = content.slice(section.start, section.end);
+  if (sectionText.length <= 2000) return sectionText;
+
+  // Section is large — narrow to a window around the match.
+  const localIdx = matchIdx - section.start;
+  const start = Math.max(0, localIdx - CONTEXT_CHARS);
+  const end = Math.min(sectionText.length, localIdx + CONTEXT_CHARS);
+  return `## ${section.heading}\n\n…\n${sectionText.slice(start, end)}\n…`;
 }
 
 function tokenize(text: string): string[] {
@@ -65,7 +135,6 @@ function scoreChunk(chunk: ChunkMeta, queryTokens: string[]): number {
   const descLower = chunk.description.toLowerCase();
 
   for (const qt of queryTokens) {
-    // Exact keyword match (highest weight)
     for (const kw of chunk.keywords) {
       if (kw === qt) {
         score += 10;
@@ -74,21 +143,16 @@ function scoreChunk(chunk: ChunkMeta, queryTokens: string[]): number {
       }
     }
 
-    // Match in name/description
     if (nameLower.includes(qt)) score += 8;
     if (descLower.includes(qt)) score += 3;
-
-    // Match in content
     if (content.includes(qt)) score += 4;
   }
 
-  // Bonus for exact multi-word match in content
   const fullQuery = queryTokens.join(" ");
   if (fullQuery.length > 3 && content.includes(fullQuery)) {
     score += 15;
   }
 
-  // Bonus for matching heading text
   const headingPattern = new RegExp(
     `^#{1,4}\\s+.*${queryTokens.map(escapeRegex).join(".*")}`,
     "im",
@@ -100,7 +164,7 @@ function scoreChunk(chunk: ChunkMeta, queryTokens: string[]): number {
   return score;
 }
 
-export function searchDocs(query: string, maxResults: number): string[] {
+export function searchDocs(query: string, maxResults: number, full = false): string[] {
   const queryTokens = tokenize(query);
   if (queryTokens.length === 0) {
     return ["Please provide a search query."];
@@ -122,7 +186,17 @@ export function searchDocs(query: string, maxResults: number): string[] {
   }
 
   return scored.map((s) => {
-    const content = loadChunk(s.chunk.filename);
-    return `# ${s.chunk.name}\n\n${content}`;
+    if (full) {
+      const content = loadChunk(s.chunk.filename);
+      return `# ${s.chunk.name}\n\n${content}`;
+    }
+    const snippet = extractSnippet(s.chunk.filename, queryTokens);
+    return (
+      `# ${s.chunk.name}\n\n` +
+      `${snippet}\n\n` +
+      `_Snippet from \`${s.chunk.filename}\`. ` +
+      `Read full chunk via resource \`lucidlink-sdk://docs/${s.chunk.id}\` ` +
+      `or call lucidlink_sdk_search again with full=true._`
+    );
   });
 }

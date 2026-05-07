@@ -2,12 +2,13 @@
 
 ## Using MCP tools
 
-The audit trail MCP server provides high-level query tools that handle the OpenSearch DSL for you:
+The audit trail MCP server provides one parametric query tool that handles the OpenSearch DSL for you:
 
-- `search_audit_events` — filtered search with user, action, path, time range
-- `count_audit_events` — aggregation counts grouped by user, action, path, or time
-- `get_user_activity` — timeline of a specific user's operations
-- `get_file_history` — all operations on a specific file/directory
+- `query_audit_events` with a `mode` parameter:
+  - `mode: 'search'` — filtered search with user, action, file_path, time range
+  - `mode: 'aggregate'` — counts grouped by user, action, path, or time (set `group_by`)
+  - `mode: 'user_activity'` — timeline of a specific user's operations (set `user`)
+  - `mode: 'file_history'` — all operations on a specific file/directory (set `file_path`)
 - `run_opensearch_query` — raw OpenSearch query DSL for advanced use
 
 ## Common query patterns

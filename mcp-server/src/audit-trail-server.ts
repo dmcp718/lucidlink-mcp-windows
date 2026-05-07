@@ -26,7 +26,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 const server = new McpServer(
-  { name: "lucidlink-audit-trail", version: "1.0.0" },
+  { name: "lucidlink-audit-trail", version: "2.3.1" },
   {
     instructions: `Audit trail analytics for LucidLink filespace file operation events.
 Manages a Docker Compose stack: OpenSearch + OpenSearch Dashboards + Fluent Bit.
@@ -45,11 +45,12 @@ AFTER START: Fluent Bit automatically ingests real audit logs from the .lucid_au
 on the mounted filespace. Events appear within 30 seconds. There is no need to load or generate
 data — real audit events are ingested automatically from the filespace.
 
-QUERY TOOLS (use after stack is running):
-  search_audit_events — filter by user, action, path, time range
-  get_user_activity — timeline for a specific user
-  get_file_history — all operations on a file/directory
-  count_audit_events — aggregate by user, action, path, or time`,
+QUERY TOOL (use after stack is running):
+  query_audit_events — single tool with mode parameter:
+    mode='search'        → filter by user, action, path, time range (replaces search_audit_events)
+    mode='user_activity' → timeline for a specific user (replaces get_user_activity)
+    mode='file_history'  → all operations on a file/directory (replaces get_file_history)
+    mode='aggregate'     → group by user, action, path, or time (replaces count_audit_events)`,
   },
 );
 
@@ -281,7 +282,7 @@ server.tool(
           : `\nReal audit data ingested from .lucid_audit logs.\n`) +
         `\nDirect the user to open http://localhost:5601 in their browser.\n` +
         `The dashboard includes: User Activity Timeline, Top Users, Event Type Distribution, Most Active Paths.\n\n` +
-        `Use search_audit_events, get_user_activity, or get_file_history to query data via MCP.`,
+        `Use query_audit_events (mode: search | user_activity | file_history | aggregate) to query data via MCP.`,
     );
   },
 );
@@ -398,129 +399,203 @@ server.tool(
 
 // ── OpenSearch Query Tools ──
 
+// Single parametric query tool — replaces search_audit_events,
+// count_audit_events, get_user_activity, get_file_history. Mode dispatches
+// to one of four query builders against the same OpenSearch index.
 server.tool(
-  "search_audit_events",
-  "Search audit trail events with filters. Supports filtering by user, action type, file path, and time range. Returns formatted event list.",
+  "query_audit_events",
+  `Query audit trail events. Pick a mode:
+  search        — list events filtered by user, action, file_path, time_range, limit
+  user_activity — timeline for one user (requires user)
+  file_history  — operations on a file/directory (requires file_path; exact toggles prefix vs exact match)
+  aggregate     — bucket counts (requires group_by: user|action|path|time; interval when group_by=time)`,
   {
+    mode: z
+      .enum(["search", "user_activity", "file_history", "aggregate"])
+      .describe("Query mode"),
     query: z
       .string()
       .optional()
-      .describe("Full-text search query (searches paths and filenames)"),
-    user: z.string().optional().describe("Filter by username (exact match)"),
+      .describe("Full-text search (search mode): paths and filenames"),
+    user: z
+      .string()
+      .optional()
+      .describe("Username — required for user_activity, optional filter elsewhere"),
     action: z
       .string()
       .optional()
-      .describe(
-        `Filter by action: ${VALID_ACTIONS.join(", ")}`,
-      ),
-    path: z
+      .describe(`Action filter: ${VALID_ACTIONS.join(", ")}`),
+    file_path: z
       .string()
       .optional()
-      .describe("Filter by file/directory path (prefix match)"),
+      .describe("Path filter — required for file_history, prefix match elsewhere"),
+    exact: z
+      .boolean()
+      .optional()
+      .describe("file_history: exact path match (default false = prefix)"),
     time_range: z
       .string()
       .optional()
-      .describe(
-        'Time range: "1h", "24h", "7d", "30d", or ISO date range "2026-01-01/2026-01-31"',
-      ),
-    limit: z.number().optional().describe("Max results (default: 50, max: 200)"),
-  },
-  async ({ query, user, action, path, time_range, limit }) => {
-    const client = getClient();
-    const must: Record<string, unknown>[] = [];
-
-    if (query) {
-      must.push({
-        multi_match: {
-          query,
-          fields: ["operation.entryPath", "operation.file", "user.name"],
-        },
-      });
-    }
-    if (user) {
-      must.push({ term: { "user.name.keyword": user } });
-    }
-    if (action) {
-      must.push({ term: { "operation.action.keyword": action } });
-    }
-    if (path) {
-      must.push({ prefix: { "operation.entryPath.keyword": path } });
-    }
-    if (time_range) {
-      const range: Record<string, string> = {};
-      if (time_range.includes("/")) {
-        const [from, to] = time_range.split("/");
-        range.gte = from;
-        range.lte = to;
-      } else {
-        range.gte = `now-${time_range}`;
-      }
-      must.push({ range: { "@timestamp": range } });
-    }
-
-    const searchQuery: Record<string, unknown> = {
-      query:
-        must.length > 0
-          ? { bool: { must } }
-          : { match_all: {} },
-      sort: [{ "@timestamp": { order: "desc" } }],
-    };
-
-    const maxResults = Math.min(limit ?? 50, 200);
-    const resp = await client.search(searchQuery, AUDIT_TRAIL_INDEX, maxResults);
-
-    if (!resp.success) {
-      return err(`Search failed: ${resp.error}`);
-    }
-
-    const data = resp.data as unknown as {
-      hits: { total: { value: number }; hits: SearchHit[] };
-    };
-    const total = data.hits.total.value;
-    const hits = data.hits.hits;
-
-    if (hits.length === 0) {
-      return ok("No audit events found matching the criteria.");
-    }
-
-    let output = `Found ${total.toLocaleString()} events (showing ${hits.length}):\n\n`;
-    output += hits.map(formatEvent).join("\n");
-
-    return ok(output);
-  },
-);
-
-server.tool(
-  "count_audit_events",
-  "Count and aggregate audit events by user, action, path, or time bucket. Returns summary counts for analysis.",
-  {
+      .describe('"1h"/"24h"/"7d"/"30d" or ISO range "2026-01-01/2026-01-31"'),
+    limit: z.number().optional().describe("Max events (default 50, max 200)"),
     group_by: z
       .enum(["user", "action", "path", "time"])
-      .describe("Field to aggregate by"),
-    time_range: z
-      .string()
       .optional()
-      .describe('Time range filter (e.g., "24h", "7d", "30d")'),
+      .describe("aggregate mode: field to bucket by"),
     interval: z
       .string()
       .optional()
-      .describe('Time bucket interval when group_by=time (default: "1h")'),
-    user: z.string().optional().describe("Filter by username"),
-    action: z.string().optional().describe("Filter by action type"),
+      .describe('aggregate + group_by=time: bucket interval (default "1h")'),
   },
-  async ({ group_by, time_range, interval, user, action }) => {
+  async ({ mode, query, user, action, file_path, exact, time_range, limit, group_by, interval }) => {
     const client = getClient();
-    const must: Record<string, unknown>[] = [];
 
-    if (time_range) {
-      must.push({ range: { "@timestamp": { gte: `now-${time_range}` } } });
+    function timeFilter(range: string): Record<string, unknown> {
+      if (range.includes("/")) {
+        const [from, to] = range.split("/");
+        return { range: { "@timestamp": { gte: from, lte: to } } };
+      }
+      return { range: { "@timestamp": { gte: `now-${range}` } } };
     }
-    if (user) {
-      must.push({ term: { "user.name.keyword": user } });
+
+    if (mode === "search") {
+      const must: Record<string, unknown>[] = [];
+      if (query) {
+        must.push({
+          multi_match: {
+            query,
+            fields: ["operation.entryPath", "operation.file", "user.name"],
+          },
+        });
+      }
+      if (user) must.push({ term: { "user.name.keyword": user } });
+      if (action) must.push({ term: { "operation.action.keyword": action } });
+      if (file_path) must.push({ prefix: { "operation.entryPath.keyword": file_path } });
+      if (time_range) must.push(timeFilter(time_range));
+
+      const searchQuery: Record<string, unknown> = {
+        query: must.length > 0 ? { bool: { must } } : { match_all: {} },
+        sort: [{ "@timestamp": { order: "desc" } }],
+      };
+
+      const maxResults = Math.min(limit ?? 50, 200);
+      const resp = await client.search(searchQuery, AUDIT_TRAIL_INDEX, maxResults);
+      if (!resp.success) return err(`Search failed: ${resp.error}`);
+
+      const data = resp.data as unknown as {
+        hits: { total: { value: number }; hits: SearchHit[] };
+      };
+      const hits = data.hits.hits;
+      if (hits.length === 0) return ok("No audit events found matching the criteria.");
+
+      let output = `Found ${data.hits.total.value.toLocaleString()} events (showing ${hits.length}):\n\n`;
+      output += hits.map(formatEvent).join("\n");
+      return ok(output);
     }
-    if (action) {
-      must.push({ term: { "operation.action.keyword": action } });
+
+    if (mode === "user_activity") {
+      if (!user) return err("user_activity mode requires user.");
+
+      const must: Record<string, unknown>[] = [
+        { term: { "user.name.keyword": user } },
+        timeFilter(time_range ?? "24h"),
+      ];
+
+      const searchQuery: Record<string, unknown> = {
+        query: { bool: { must } },
+        sort: [{ "@timestamp": { order: "desc" } }],
+        aggs: {
+          by_action: { terms: { field: "operation.action.keyword" } },
+          by_device: { terms: { field: "device.hostName.keyword", size: 10 } },
+        },
+      };
+
+      const maxResults = Math.min(limit ?? 50, 200);
+      const resp = await client.search(searchQuery, AUDIT_TRAIL_INDEX, maxResults);
+      if (!resp.success) return err(`Query failed: ${resp.error}`);
+
+      const data = resp.data as unknown as {
+        hits: { total: { value: number }; hits: SearchHit[] };
+        aggregations: {
+          by_action: { buckets: Array<{ key: string; doc_count: number }> };
+          by_device: { buckets: Array<{ key: string; doc_count: number }> };
+        };
+      };
+
+      const hits = data.hits.hits;
+      if (hits.length === 0) {
+        return ok(`No activity found for user "${user}" in the specified time range.`);
+      }
+
+      let output = `Activity for ${user} (${data.hits.total.value.toLocaleString()} events):\n\n`;
+      const actions = data.aggregations?.by_action?.buckets ?? [];
+      if (actions.length > 0) {
+        output += "Actions: " + actions.map((a) => `${a.key} (${a.doc_count})`).join(", ") + "\n";
+      }
+      const devices = data.aggregations?.by_device?.buckets ?? [];
+      if (devices.length > 0) {
+        output += "Devices: " + devices.map((d) => d.key).join(", ") + "\n";
+      }
+      output += `\nRecent events:\n`;
+      output += hits.map(formatEvent).join("\n");
+      return ok(output);
     }
+
+    if (mode === "file_history") {
+      if (!file_path) return err("file_history mode requires file_path.");
+
+      const must: Record<string, unknown>[] = [
+        exact
+          ? { term: { "operation.entryPath.keyword": file_path } }
+          : { prefix: { "operation.entryPath.keyword": file_path } },
+        timeFilter(time_range ?? "30d"),
+      ];
+
+      const searchQuery: Record<string, unknown> = {
+        query: { bool: { must } },
+        sort: [{ "@timestamp": { order: "desc" } }],
+        aggs: {
+          by_user: { terms: { field: "user.name.keyword", size: 20 } },
+          by_action: { terms: { field: "operation.action.keyword" } },
+        },
+      };
+
+      const maxResults = Math.min(limit ?? 50, 200);
+      const resp = await client.search(searchQuery, AUDIT_TRAIL_INDEX, maxResults);
+      if (!resp.success) return err(`Query failed: ${resp.error}`);
+
+      const data = resp.data as unknown as {
+        hits: { total: { value: number }; hits: SearchHit[] };
+        aggregations: {
+          by_user: { buckets: Array<{ key: string; doc_count: number }> };
+          by_action: { buckets: Array<{ key: string; doc_count: number }> };
+        };
+      };
+
+      const hits = data.hits.hits;
+      if (hits.length === 0) return ok(`No operations found for path "${file_path}".`);
+
+      let output = `History for ${file_path} (${data.hits.total.value.toLocaleString()} events):\n\n`;
+      const users = data.aggregations?.by_user?.buckets ?? [];
+      if (users.length > 0) {
+        output += "Users: " + users.map((u) => `${u.key} (${u.doc_count})`).join(", ") + "\n";
+      }
+      const actions = data.aggregations?.by_action?.buckets ?? [];
+      if (actions.length > 0) {
+        output += "Actions: " + actions.map((a) => `${a.key} (${a.doc_count})`).join(", ") + "\n";
+      }
+      output += `\nEvents:\n`;
+      output += hits.map(formatEvent).join("\n");
+      return ok(output);
+    }
+
+    // mode === "aggregate"
+    if (!group_by) return err("aggregate mode requires group_by.");
+
+    const must: Record<string, unknown>[] = [];
+    if (time_range) must.push(timeFilter(time_range));
+    if (user) must.push({ term: { "user.name.keyword": user } });
+    if (action) must.push({ term: { "operation.action.keyword": action } });
 
     const fieldMap: Record<string, unknown> = {
       user: { terms: { field: "user.name.keyword", size: 50 } },
@@ -541,9 +616,7 @@ server.tool(
     };
 
     const resp = await client.search(searchQuery);
-    if (!resp.success) {
-      return err(`Aggregation failed: ${resp.error}`);
-    }
+    if (!resp.success) return err(`Aggregation failed: ${resp.error}`);
 
     const data = resp.data as unknown as {
       hits: { total: { value: number } };
@@ -552,174 +625,12 @@ server.tool(
       };
     };
 
-    const total = data.hits.total.value;
     const buckets = data.aggregations?.breakdown?.buckets ?? [];
-
-    let output = `Total events: ${total.toLocaleString()}\n\nBreakdown by ${group_by}:\n\n`;
+    let output = `Total events: ${data.hits.total.value.toLocaleString()}\n\nBreakdown by ${group_by}:\n\n`;
     for (const b of buckets) {
       const label = b.key_as_string ?? b.key;
       output += `  ${label}: ${b.doc_count.toLocaleString()}\n`;
     }
-
-    return ok(output);
-  },
-);
-
-server.tool(
-  "get_user_activity",
-  "Get a timeline of a specific user's file operations. Shows recent activity with timestamps, actions, and paths.",
-  {
-    username: z.string().describe("Username to look up"),
-    time_range: z
-      .string()
-      .optional()
-      .describe('Time range (default: "24h")'),
-    limit: z.number().optional().describe("Max events (default: 50)"),
-  },
-  async ({ username, time_range, limit }) => {
-    const client = getClient();
-    const must: Record<string, unknown>[] = [
-      { term: { "user.name.keyword": username } },
-    ];
-
-    if (time_range) {
-      must.push({
-        range: { "@timestamp": { gte: `now-${time_range ?? "24h"}` } },
-      });
-    } else {
-      must.push({ range: { "@timestamp": { gte: "now-24h" } } });
-    }
-
-    const searchQuery: Record<string, unknown> = {
-      query: { bool: { must } },
-      sort: [{ "@timestamp": { order: "desc" } }],
-      aggs: {
-        by_action: { terms: { field: "operation.action.keyword" } },
-        by_device: { terms: { field: "device.hostName.keyword", size: 10 } },
-      },
-    };
-
-    const maxResults = Math.min(limit ?? 50, 200);
-    const resp = await client.search(searchQuery, AUDIT_TRAIL_INDEX, maxResults);
-
-    if (!resp.success) {
-      return err(`Query failed: ${resp.error}`);
-    }
-
-    const data = resp.data as unknown as {
-      hits: { total: { value: number }; hits: SearchHit[] };
-      aggregations: {
-        by_action: { buckets: Array<{ key: string; doc_count: number }> };
-        by_device: { buckets: Array<{ key: string; doc_count: number }> };
-      };
-    };
-
-    const total = data.hits.total.value;
-    const hits = data.hits.hits;
-
-    if (hits.length === 0) {
-      return ok(
-        `No activity found for user "${username}" in the specified time range.`,
-      );
-    }
-
-    let output = `Activity for ${username} (${total.toLocaleString()} events):\n\n`;
-
-    // Summary
-    const actions = data.aggregations?.by_action?.buckets ?? [];
-    if (actions.length > 0) {
-      output += "Actions: " + actions.map((a) => `${a.key} (${a.doc_count})`).join(", ") + "\n";
-    }
-    const devices = data.aggregations?.by_device?.buckets ?? [];
-    if (devices.length > 0) {
-      output += "Devices: " + devices.map((d) => d.key).join(", ") + "\n";
-    }
-
-    output += `\nRecent events:\n`;
-    output += hits.map(formatEvent).join("\n");
-
-    return ok(output);
-  },
-);
-
-server.tool(
-  "get_file_history",
-  "Get all operations performed on a specific file or directory path. Shows who did what and when.",
-  {
-    path: z
-      .string()
-      .describe(
-        "File or directory path to look up (exact or prefix match)",
-      ),
-    exact: z
-      .boolean()
-      .optional()
-      .describe("Exact path match (default: false, uses prefix match)"),
-    time_range: z
-      .string()
-      .optional()
-      .describe('Time range (default: "30d")'),
-    limit: z.number().optional().describe("Max events (default: 50)"),
-  },
-  async ({ path: filePath, exact, time_range, limit }) => {
-    const client = getClient();
-    const must: Record<string, unknown>[] = [];
-
-    if (exact) {
-      must.push({ term: { "operation.entryPath.keyword": filePath } });
-    } else {
-      must.push({ prefix: { "operation.entryPath.keyword": filePath } });
-    }
-
-    must.push({
-      range: { "@timestamp": { gte: `now-${time_range ?? "30d"}` } },
-    });
-
-    const searchQuery: Record<string, unknown> = {
-      query: { bool: { must } },
-      sort: [{ "@timestamp": { order: "desc" } }],
-      aggs: {
-        by_user: { terms: { field: "user.name.keyword", size: 20 } },
-        by_action: { terms: { field: "operation.action.keyword" } },
-      },
-    };
-
-    const maxResults = Math.min(limit ?? 50, 200);
-    const resp = await client.search(searchQuery, AUDIT_TRAIL_INDEX, maxResults);
-
-    if (!resp.success) {
-      return err(`Query failed: ${resp.error}`);
-    }
-
-    const data = resp.data as unknown as {
-      hits: { total: { value: number }; hits: SearchHit[] };
-      aggregations: {
-        by_user: { buckets: Array<{ key: string; doc_count: number }> };
-        by_action: { buckets: Array<{ key: string; doc_count: number }> };
-      };
-    };
-
-    const total = data.hits.total.value;
-    const hits = data.hits.hits;
-
-    if (hits.length === 0) {
-      return ok(`No operations found for path "${filePath}".`);
-    }
-
-    let output = `History for ${filePath} (${total.toLocaleString()} events):\n\n`;
-
-    const users = data.aggregations?.by_user?.buckets ?? [];
-    if (users.length > 0) {
-      output += "Users: " + users.map((u) => `${u.key} (${u.doc_count})`).join(", ") + "\n";
-    }
-    const actions = data.aggregations?.by_action?.buckets ?? [];
-    if (actions.length > 0) {
-      output += "Actions: " + actions.map((a) => `${a.key} (${a.doc_count})`).join(", ") + "\n";
-    }
-
-    output += `\nEvents:\n`;
-    output += hits.map(formatEvent).join("\n");
-
     return ok(output);
   },
 );
