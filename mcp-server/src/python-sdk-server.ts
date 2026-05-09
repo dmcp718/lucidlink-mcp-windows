@@ -17,7 +17,7 @@ import { CHUNKS } from "./python-sdk/constants.js";
 import { searchDocs, loadChunk } from "./python-sdk/tools.js";
 
 const server = new McpServer(
-  { name: "lucidlink-python-sdk", version: "2.3.1" },
+  { name: "lucidlink-python-sdk", version: "2.5.4" },
   {
     instructions: `LucidLink Python SDK documentation server.
 

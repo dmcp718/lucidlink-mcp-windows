@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // manifestEntry represents one entry in mcp-servers.json.
@@ -72,6 +73,21 @@ func mergeIDEConfig(paths bundlePaths, configPath, topKey string, addTypeStdio b
 	if existing == nil {
 		existing = make(map[string]interface{})
 	}
+
+	// Garbage-collect stale lucidlink-* entries from previous app versions
+	// (e.g. lucidlink-connect-api, lucidlink-filespace-search, -browser before
+	// the v2.5.0 consolidation). These point at script files this build no
+	// longer ships, so the IDE spawns them and reports "Server disconnected."
+	// Non-LucidLink servers the user added themselves are untouched.
+	for key := range existing {
+		if !strings.HasPrefix(key, "lucidlink-") {
+			continue
+		}
+		if _, stillValid := servers[key]; !stillValid {
+			delete(existing, key)
+		}
+	}
+
 	for name, entry := range servers {
 		existing[name] = entry
 	}

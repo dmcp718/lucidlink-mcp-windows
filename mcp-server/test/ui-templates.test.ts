@@ -9,9 +9,8 @@
  */
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { generateConnectUI } from "../dist/connect/ui-template.js";
-import { generateFilespacesBrowser } from "../dist/connect/browser-template.js";
-import { generateSearchUI } from "../dist/connect/search-template.js";
+import { generateConnectUI } from "../dist/blueprints/connect-ui.js";
+import { generateSearchUI } from "../dist/blueprints/filespace-search-ui.js";
 
 describe("Connect UI template", () => {
   const project = generateConnectUI("test-fs-id", "test-ds-id");
@@ -48,33 +47,6 @@ describe("Connect UI template", () => {
     const allContent = Object.values(project.files).join("\n");
     assert.ok(allContent.includes("test-fs-id"), "Should pre-fill filespace ID");
     assert.ok(allContent.includes("test-ds-id"), "Should pre-fill data store ID");
-  });
-});
-
-describe("Filespace browser template", () => {
-  const project = generateFilespacesBrowser(3099);
-
-  it("returns files object", () => {
-    assert.ok(project.files, "Should return files");
-    assert.ok(Object.keys(project.files).length > 0, "Should have at least one file");
-  });
-
-  it("includes server.js", () => {
-    assert.ok("server.js" in project.files, "Should include server.js");
-  });
-
-  it("includes package.json", () => {
-    assert.ok("package.json" in project.files, "Should include package.json");
-  });
-
-  it("uses Inter font family (not Aeonik)", () => {
-    const allContent = Object.values(project.files).join("\n");
-    assert.ok(!allContent.includes("Aeonik"), "Should not reference Aeonik");
-  });
-
-  it("uses configured port", () => {
-    const serverJs = project.files["server.js"];
-    assert.ok(serverJs.includes("3099"), "Should use configured port");
   });
 });
 

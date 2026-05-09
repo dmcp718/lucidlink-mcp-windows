@@ -14,12 +14,10 @@ Read this guide before taking action — it will save you from mistakes.
 
 ARCHITECTURE
 ============
-                                    ┌─ lucidlink-api (28 tools)
-  Claude Desktop ──► MCP servers ───┼─ lucidlink-connect-api (18 tools)
-                                    ├─ lucidlink-filespace-search (5 tools)
-                                    ├─ lucidlink-filespace-browser (1 tool)
-                                    ├─ lucidlink-audit-trail (15 tools)
-                                    └─ lucidlink-python-sdk (1 tool + 9 resources)
+                                    ┌─ lucidlink-api (57 tools — Admin + Connect)
+  Claude Desktop ──► MCP servers ───┼─ lucidlink-filespace (5 tools)
+                                    ├─ lucidlink-audit-trail (14 tools)
+                                    └─ lucidlink-python-sdk (1 tool + 11 resources)
                                           │
                           LucidLink API ◄──┘  (Docker: lucidlink/lucidlink-api)
                           fs-index-server ◄── (localhost:3201, Go binary)
@@ -33,8 +31,10 @@ CONFIGURATION:
 The LucidLink API is deployed as a self-hosted Docker container (lucidlink/lucidlink-api
 on DockerHub). See search_api_docs for deployment, scaling, and best practices.
 
-The LucidLink API is a single process shared by lucidlink-api and lucidlink-connect-api.
-The fs-index-server is a separate Go binary managed by lucidlink-filespace-search.
+lucidlink-api covers both administration (filespaces, members, groups, permissions, service
+accounts) and Connect (S3 data stores, external entries, HTTP link files) — they share the
+same API container.
+The fs-index-server is a separate Go binary managed by lucidlink-filespace.
 
 IMPORTANT RULES
 ===============
@@ -46,9 +46,11 @@ IMPORTANT RULES
 - ALWAYS use existing tools. Do not build custom scripts for tasks the tools handle.
 - When generating any UI, use dark theme (#151519 background, white text, #B0FB15 accent).
 
-SERVER 1: lucidlink-api (filespace administration)
-==================================================
-Manages filespaces, users, groups, and permissions via the LucidLink Admin API.
+SERVER 1: lucidlink-api (Admin + Connect)
+==========================================
+Single MCP server covering the full LucidLink API — administration (filespaces, members,
+groups, permissions, service accounts) and Connect (data stores, external entries,
+HTTP link files). Backed by the LucidLink API container at :3003.
 
 Connection:
   check_api_connection      — verify API connectivity and configuration
@@ -81,10 +83,22 @@ Group management:
   remove_member_from_group  — remove a member from a group
 
 Permissions:
-  grant_permission          — grant folder permission to a user or group
+  grant_permission          — grant folder permission to a user, group, or service account
   list_permissions          — list permissions on a filespace
   update_permission         — change permission level
   revoke_permission         — remove a permission
+
+Service accounts (collaborators):
+  create_service_account    — create a service account + initial bearer token (token shown ONCE)
+  list_service_accounts     — list all service accounts in the workspace
+  get_service_account       — get service account details by ID
+  delete_service_account    — delete a service account and revoke all its identities
+  create_identity           — issue a new bearer token for an existing service account
+  list_identities           — list all identities (token metadata) for a service account
+  delete_identity           — revoke a specific identity (rotate keys without recreating account)
+
+  Note: when granting filespace permissions, use the SERVICE ACCOUNT id as principalId,
+  NOT the identity id. Identities are just rotatable credentials for a service account.
 
 Direct links:
   generate_direct_link      — generate a shareable URL for a file or folder
@@ -104,45 +118,41 @@ Example workflow — set up a new filespace:
   5. add_member_to_group → assign members
   6. grant_permission → set folder access
 
-SERVER 2: lucidlink-connect-api (S3 object linking)
-====================================================
-Links existing S3 objects into a filespace as read-only entries.
-Connection check (check_api_connection) is on lucidlink-api.
+Connect tools (link external files into filespaces, read-only):
+  Workflow guide:
+    get_connect_workflow_guide — full quickstart and reference (call this first)
 
-Workflow guide:
-  get_connect_workflow_guide — full quickstart and reference (call this first)
+  UI generation:
+    create_connect_ui         — generates a complete web app for S3 browsing/importing
+                                Do NOT build UIs manually — always use this tool.
 
-UI generation:
-  create_connect_ui         — generates a complete web app for S3 browsing/importing
-                              Do NOT build UIs manually — always use this tool.
+  High-level tools (recommended):
+    ensure_folder_path        — create nested directory structure in one call
+    import_s3_object          — create dirs + link one S3 object
+    bulk_import_s3_objects    — create dirs + link many objects with progress
+    link_http_file            — create dirs + link one HTTP/HTTPS URL (no Data Store)
+    bulk_link_http_files      — create dirs + link many HTTP URLs
 
-High-level tools (recommended):
-  ensure_folder_path        — create nested directory structure in one call
-  import_s3_object          — create dirs + link one S3 object
-  bulk_import_s3_objects    — create dirs + link many objects with progress
+  Primitive API tools:
+    create_entry, resolve_entry, get_entry, delete_entry, list_entry_children
+    create_data_store, list_data_stores, get_data_store, update_data_store, delete_data_store
+    create_external_entry, list_external_entry_ids, delete_external_entry
+    create_http_link, update_http_link_url
 
-Primitive API tools:
-  create_entry, resolve_entry, get_entry, delete_entry, list_entry_children
-  create_data_store, list_data_stores, get_data_store, update_data_store, delete_data_store
-  create_external_entry, list_external_entry_ids, delete_external_entry
-
-SERVER 3: lucidlink-filespace-search (file indexing & search)
-=============================================================
+SERVER 2: lucidlink-filespace (search + index)
+===============================================
 Runs a Go backend (fs-index-server) that crawls mounted filespaces and provides
-full-text search via SQLite FTS5.
+full-text search via SQLite FTS5. The only UI generator on this server is
+create_search_ui — there is no separate "browser" tool.
 
 Tools:
-  start_filespace_indexer, search_filespace, browse_filespace, indexer_status, create_search_ui
+  start_filespace_indexer, search_filespace, browse_filespace, indexer_status,
+  create_search_ui
 
 Resource:
   lucidlink://search/api-reference — Complete REST API reference for fs-index-server.
 
-SERVER 4: lucidlink-filespace-browser (visual file browser)
-============================================================
-Tools:
-  create_filespace_browser  — generates a complete Node.js + Express web app
-
-SERVER 5: lucidlink-audit-trail (file operation analytics)
+SERVER 3: lucidlink-audit-trail (file operation analytics)
 ============================================================
 Manages the audit trail Docker Compose stack (OpenSearch + Dashboards + Fluent Bit).
 
@@ -150,9 +160,9 @@ Tools:
   discover_filespace_mounts, setup_audit_trail, start_audit_trail, stop_audit_trail,
   audit_trail_status, query_audit_events (mode: search | user_activity | file_history | aggregate),
   run_opensearch_query, create_audit_alert, list_audit_alerts,
-  delete_audit_alert, setup_slack_webhook, get_audit_trail_schema
+  delete_audit_alert, setup_slack_webhook, get_audit_trail_schema, create_audit_dashboard
 
-SERVER 6: lucidlink-python-sdk (Python SDK documentation)
+SERVER 4: lucidlink-python-sdk (Python SDK documentation)
 ============================================================
 Searchable documentation for the LucidLink Python SDK.
 
@@ -167,16 +177,16 @@ WHEN TO USE WHICH SERVER
 ========================
 "List my filespaces"              → lucidlink-api: list_filespaces
 "Add a user to the marketing fs"  → lucidlink-api: add_member
-"Search for quarterly reports"    → lucidlink-filespace-search: start_filespace_indexer + search_filespace
-"Build me a search app"           → lucidlink-filespace-search: create_search_ui
-"Link S3 objects into a filespace"→ lucidlink-connect-api: get_connect_workflow_guide
+"Search for quarterly reports"    → lucidlink-filespace: start_filespace_indexer + search_filespace
+"Build me a search app"           → lucidlink-filespace: create_search_ui
+"Link S3 objects into a filespace"→ lucidlink-api: get_connect_workflow_guide
 "Set up audit trail dashboard"   → lucidlink-audit-trail: setup_audit_trail + start_audit_trail
 "How do I use the Python SDK?"   → lucidlink-python-sdk: lucidlink_sdk_search
 
 GENERATING UIs
 ==============
 When asked to create any UI, dashboard, or web interface:
-1. Check if a tool already generates it (create_connect_ui, create_filespace_browser)
+1. Check if a tool already generates it (create_connect_ui, create_search_ui, create_audit_dashboard)
 2. If yes, USE THAT TOOL — do not build from scratch
 3. If you must generate custom UI, read lucidlink://brand/design-tokens first
 4. Use: Inter font, dark theme (#151519), neon accent (#B0FB15), sentence case

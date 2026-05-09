@@ -10,5 +10,9 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true
   },
-  "include": ["./**/*.ts"]
+  "include": ["./**/*.ts"],
+  "exclude": [
+    "process-manager.test.ts",
+    "audit-trail-integration.ts"
+  ]
 }

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * LucidLink Filespace Search MCP Server
+ * LucidLink Filespace MCP Server
  *
- * Standalone MCP server that manages the fs-index-server Go binary.
- * Provides filespace search, browsing, and indexing via a compiled Go
- * backend with SQLite FTS5 full-text search.
+ * Search and indexing for LucidLink filespaces, backed by the fs-index-server
+ * Go binary (SQLite FTS5). Includes one UI generator: create_search_ui, which
+ * produces a full-text search web app.
  *
  * The Go binary discovers LucidLink filespace mounts via `lucid list`
  * and `lucid --instance <id> status`, then crawls and indexes all files
@@ -17,7 +17,8 @@ import { registerBrandResource } from "./shared/brand-resource.js";
 import { registerCapabilitiesResource } from "./shared/capabilities-resource.js";
 import { ok, err } from "./shared/formatters.js";
 import { getFsIndexBinary } from "./shared/config.js";
-import { generateSearchUI, GeneratedProject } from "./connect/search-template.js";
+import { findFsIndexBinary } from "./shared/find-fs-index.js";
+import { generateSearchUI, GeneratedProject } from "./blueprints/filespace-search-ui.js";
 
 import { existsSync, readFileSync } from "node:fs";
 import { resolve, dirname, join } from "node:path";
@@ -26,42 +27,9 @@ import { execSync } from "node:child_process";
 
 const __scriptDir = dirname(fileURLToPath(import.meta.url));
 
-/** Resolve the fs-index-server binary from known locations */
+/** Thin wrapper that pulls config + delegates to the unit-testable helper. */
 function findBinary(): { binaryPath: string; binaryDir: string } | null {
-  // 1. Explicit env var / config override
-  const explicit = getFsIndexBinary();
-  if (explicit && existsSync(explicit)) {
-    return { binaryPath: resolve(explicit), binaryDir: dirname(resolve(explicit)) };
-  }
-
-  // 2. Known locations
-  const candidates = [
-    // Same directory as this script
-    join(__scriptDir, "fs-index-server"),
-    // Development: repo_root/fs-index-server/fs-index-server
-    join(__scriptDir, "..", "fs-index-server", "fs-index-server"),
-    // CWD-based
-    join(process.cwd(), "fs-index-server", "fs-index-server"),
-  ];
-
-  for (const c of candidates) {
-    const resolved = resolve(c);
-    if (existsSync(resolved)) {
-      return { binaryPath: resolved, binaryDir: dirname(resolved) };
-    }
-  }
-
-  // 3. Check PATH
-  try {
-    const which = execSync("which fs-index-server", { encoding: "utf-8" }).trim();
-    if (which && existsSync(which)) {
-      return { binaryPath: which, binaryDir: dirname(which) };
-    }
-  } catch {
-    // Not on PATH
-  }
-
-  return null;
+  return findFsIndexBinary(__scriptDir, getFsIndexBinary());
 }
 
 // ── fs-index-server API reference (exposed as MCP resource) ──
@@ -94,12 +62,15 @@ function loadApiReference(): string {
 }
 
 const server = new McpServer(
-  { name: "lucidlink-filespace-search", version: "2.3.1" },
-  { instructions: `Filespace search and browsing server backed by fs-index-server (Go binary on localhost:3201).
-Call start_filespace_indexer first, then search_filespace or browse_filespace.
+  { name: "lucidlink-filespace", version: "2.5.4" },
+  { instructions: `Filespace experience server: search and index LucidLink filespaces.
 
-Use create_search_ui when the user asks to build, generate, or launch a search web app, UI, or dashboard
-— always use it instead of building a search UI manually.
+Search and indexing are backed by fs-index-server (Go binary on localhost:3201). Call start_filespace_indexer first, then search_filespace or browse_filespace (browse_filespace lists directory contents from the index — it is NOT a UI).
+
+UI generation:
+- create_search_ui — full-text search web app on top of the indexer. Use this whenever the user asks to "create", "build", or "generate" any kind of search UI, web app, dashboard, or interface for filespace data. ALWAYS use this tool.
+
+If start_filespace_indexer fails because the binary is missing: report it as a packaging problem. DO NOT pivot to a different tool. DO NOT generate a substitute UI.
 
 NEVER rewrite the Go backend. NEVER build a search backend in another language.` },
 );
@@ -144,10 +115,14 @@ server.tool(
     const found = findBinary();
     if (!found) {
       return err(
-        "fs-index-server binary not found.\n\n" +
-        "Build it with:\n" +
-        "  cd fs-index-server && go build -o fs-index-server .\n\n" +
-        "This is a compiled Go binary — do NOT attempt to rewrite it in another language."
+        "fs-index-server binary not found in expected locations.\n\n" +
+        "This is a packaging issue with the LucidLink MCP installation, NOT a task " +
+        "for the user or assistant to resolve. The binary ships pre-compiled inside " +
+        "the macOS app bundle (Contents/Resources/fs-index-server) — if it's missing, " +
+        "the .app is incomplete or the search server is being run outside the bundle.\n\n" +
+        "DO NOT attempt to build or compile the binary. DO NOT run `go build`. " +
+        "DO NOT rewrite this in another language. Stop here and report the missing " +
+        "binary to the user as an installation problem."
       );
     }
 

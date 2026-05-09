@@ -4,16 +4,8 @@
     "script": "lucid-api-server.js"
   },
   {
-    "name": "lucidlink-connect-api",
-    "script": "connect-server.js"
-  },
-  {
-    "name": "lucidlink-filespace-search",
-    "script": "search-server.js"
-  },
-  {
-    "name": "lucidlink-filespace-browser",
-    "script": "browser-server.js"
+    "name": "lucidlink-filespace",
+    "script": "filespace-server.js"
   },
   {
     "name": "lucidlink-audit-trail",

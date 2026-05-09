@@ -175,12 +175,21 @@ if (Test-Path $pyChunks) {
     Copy-Item -Path "$pyChunks\*.md" -Destination $destPyChunks
 }
 
-# Filespace search API reference (loaded by search-server.ts as an MCP resource)
+# Filespace API reference (loaded by filespace-server.ts as an MCP resource)
 $searchDir = Join-Path (Join-Path $FILES_DIR "src") "search"
 if (Test-Path $searchDir) {
     $destSearch = Join-Path (Join-Path $OUTPUT_DIR "mcp") "search"
     New-Item -ItemType Directory -Force -Path $destSearch | Out-Null
     Copy-Item -Path "$searchDir\*.md" -Destination $destSearch
+}
+
+# Audit-dashboard blueprint assets (audit-dashboard.ts looks for them next to
+# the compiled JS at <__dir>/audit-dashboard-assets/, i.e. mcp/blueprints/...).
+$auditAssets = Join-Path (Join-Path (Join-Path $FILES_DIR "src") "blueprints") "audit-dashboard-assets"
+if (Test-Path $auditAssets) {
+    $destAuditAssets = Join-Path (Join-Path (Join-Path $OUTPUT_DIR "mcp") "blueprints") "audit-dashboard-assets"
+    New-Item -ItemType Directory -Force -Path $destAuditAssets | Out-Null
+    Copy-Item -Path "$auditAssets\*" -Destination $destAuditAssets -Recurse -Force
 }
 
 # Production node_modules

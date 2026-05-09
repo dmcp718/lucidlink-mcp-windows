@@ -33,22 +33,17 @@ describe("Shared module imports (compiled JS)", () => {
     assert.ok(typeof mod.RateLimiter === "function");
   });
 
-  it("imports shared/keychain", async () => {
-    const mod = await import("../dist/shared/keychain.js");
+  // shared/keychain and shared/process-manager were removed before the test
+  // suite was updated; bearer-token retrieval now lives in shared/config.
+  it("imports shared/config (bearer token + API URL helpers)", async () => {
+    const mod = await import("../dist/shared/config.js");
     assert.ok(typeof mod.getBearerToken === "function");
-    assert.ok(typeof mod.storeBearerToken === "function");
+    assert.ok(typeof mod.getApiUrl === "function");
   });
 
   it("imports shared/api-client", async () => {
     const mod = await import("../dist/shared/api-client.js");
     assert.ok(typeof mod.ApiClient === "function");
-  });
-
-  it("imports shared/process-manager", async () => {
-    const mod = await import("../dist/shared/process-manager.js");
-    assert.ok(typeof mod.ensureApiRunning === "function");
-    assert.ok(typeof mod.isApiRunning === "function");
-    assert.ok(typeof mod.getApiLogs === "function");
   });
 
   it("imports shared/brand-resource", async () => {
@@ -68,13 +63,18 @@ describe("Shared module imports (compiled JS)", () => {
     assert.ok(typeof mod.bulkImportS3Objects === "function");
   });
 
-  it("imports connect/ui-template", async () => {
-    const mod = await import("../dist/connect/ui-template.js");
+  it("imports blueprints/connect-ui", async () => {
+    const mod = await import("../dist/blueprints/connect-ui.js");
     assert.ok(typeof mod.generateConnectUI === "function");
   });
 
-  it("imports connect/browser-template", async () => {
-    const mod = await import("../dist/connect/browser-template.js");
-    assert.ok(typeof mod.generateFilespacesBrowser === "function");
+  it("imports blueprints/filespace-search-ui", async () => {
+    const mod = await import("../dist/blueprints/filespace-search-ui.js");
+    assert.ok(typeof mod.generateSearchUI === "function");
+  });
+
+  it("imports blueprints/audit-dashboard", async () => {
+    const mod = await import("../dist/blueprints/audit-dashboard.js");
+    assert.ok(typeof mod.generateAuditDashboard === "function");
   });
 });

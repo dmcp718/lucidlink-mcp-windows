@@ -52,10 +52,12 @@ describe("Capabilities resource content", () => {
   const content = readFileSync(capFile, "utf-8");
 
   it("lists all 4 servers", () => {
+    // Post-consolidation: lucidlink-api covers Admin + Connect; lucidlink-filespace
+    // covers search + browse. Audit trail and Python SDK are unchanged.
     assert.ok(content.includes("lucidlink-api"));
-    assert.ok(content.includes("lucidlink-connect-api"));
-    assert.ok(content.includes("lucidlink-filespace-search"));
-    assert.ok(content.includes("lucidlink-filespace-browser"));
+    assert.ok(content.includes("lucidlink-filespace"));
+    assert.ok(content.includes("lucidlink-audit-trail"));
+    assert.ok(content.includes("lucidlink-python-sdk"));
   });
 
   it("only references Aeonik in a 'never use' context", () => {

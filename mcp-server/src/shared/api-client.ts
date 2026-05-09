@@ -156,6 +156,32 @@ export class ApiClient {
   getHealth() { return this.request("GET", "/health"); }
   listProviders() { return this.request("GET", "/providers"); }
 
+  // ── Service Accounts (collaborators) ──
+
+  createServiceAccount(name: string, identity?: { isSingleUse?: boolean; expiresAt?: string }) {
+    const data: Record<string, unknown> = { name };
+    if (identity && (identity.isSingleUse !== undefined || identity.expiresAt !== undefined)) {
+      data.serviceIdentity = identity;
+    }
+    return this.request("POST", "/service-accounts", { data });
+  }
+  listServiceAccounts() { return this.request("GET", "/service-accounts"); }
+  getServiceAccount(id: string) { return this.request("GET", `/service-accounts/${id}`); }
+  deleteServiceAccount(id: string) { return this.request("DELETE", `/service-accounts/${id}`); }
+
+  createIdentity(serviceAccountId: string, opts: { isSingleUse?: boolean; expiresAt?: string } = {}) {
+    const data: Record<string, unknown> = {};
+    if (opts.isSingleUse !== undefined) data.isSingleUse = opts.isSingleUse;
+    if (opts.expiresAt !== undefined) data.expiresAt = opts.expiresAt;
+    return this.request("POST", `/service-accounts/${serviceAccountId}/identities`, { data });
+  }
+  listIdentities(serviceAccountId: string) {
+    return this.request("GET", `/service-accounts/${serviceAccountId}/identities`);
+  }
+  deleteIdentity(serviceAccountId: string, identityId: string) {
+    return this.request("DELETE", `/service-accounts/${serviceAccountId}/identities/${identityId}`);
+  }
+
   // ── Connect API methods ──
 
   createEntry(filespaceId: string, parentId: string, name: string) {

@@ -12,6 +12,7 @@ import { z } from "zod";
 import { registerBrandResource } from "./shared/brand-resource.js";
 import { registerCapabilitiesResource } from "./shared/capabilities-resource.js";
 import { registerDocsSearch } from "./docs/docs-search.js";
+import { registerConnectTools } from "./connect/register.js";
 
 import { ApiClient } from "./shared/api-client.js";
 import { getBearerToken, getApiUrl, CONFIG_PATH_DISPLAY } from "./shared/config.js";
@@ -52,28 +53,43 @@ async function ensureReady(): Promise<string | null> {
 // ── Server ──
 
 const server = new McpServer(
-  { name: "lucidlink-api", version: "2.3.1" },
-  { instructions: `LucidLink Admin API server — manages filespaces, members, groups, and permissions.
+  { name: "lucidlink-api", version: "2.5.4" },
+  { instructions: `LucidLink API server — single MCP server for the entire LucidLink API surface (Admin + Connect).
 
 The LucidLink API runs as a self-hosted Docker container (lucidlink/lucidlink-api on DockerHub).
 Configure the API URL via LUCIDLINK_API_URL env var (default: http://localhost:3003/api/v1).
 Set your bearer token via LUCIDLINK_BEARER_TOKEN env var or in ~/.lucidlink/mcp-config.json.
 
-CANONICAL CRUD FLOW: every resource (filespaces, members, groups, permissions) returns IDs from
-create/list operations. Always start with list_filespaces / list_members / list_groups /
-list_permissions to discover IDs before calling get_*, update_*, delete_*, grant_*, or revoke_*.
-All IDs are UUIDs.
+ADMIN — filespaces, members, groups, permissions, service accounts.
+CANONICAL CRUD FLOW: every resource returns IDs from create/list operations. Always start with
+list_* to discover IDs before calling get_*, update_*, delete_*, grant_*, or revoke_*. All IDs
+are UUIDs.
 
-Key workflows:
+Key admin workflows:
 - Set up a filespace: list_providers → create_filespace → add_member → create_group → add_member_to_group → grant_permission
 - Manage access: list_members/list_groups to find IDs, then grant_permission/update_permission/revoke_permission
 - add_member_to_group is the batch endpoint (PUT /groups/members) — use it for adding one or many members
-- For questions about the API (authentication, deployment, best practices, scaling, Connect): use search_api_docs` },
+- Service accounts (collaborators): create_service_account → returns the bearer token ONCE in the same response. Use the SERVICE ACCOUNT id (not the identity id) as principalId in grant_permission. Rotate keys with create_identity / delete_identity without recreating the account.
+
+CONNECT — link existing external files into filespaces as read-only entries (no copy).
+Two kinds of external entry: SingleObjectFile (S3 via a Data Store) and HttpLinkFile (any
+HTTP/HTTPS URL, no Data Store; requires API v1.4.3+). Use get_connect_workflow_guide for the
+complete reference.
+
+Typical S3 workflow:    create_data_store → ensure_folder_path → bulk_import_s3_objects.
+Typical HTTP workflow:  ensure_folder_path → link_http_file (or bulk_link_http_files).
+URL rotation for HTTP links: update_http_link_url.
+
+Use create_connect_ui when the user asks to create, generate, build, or launch a Connect UI —
+always use it instead of building a UI manually.
+
+For questions about the API (authentication, deployment, best practices, scaling): use search_api_docs` },
 );
 
 registerBrandResource(server);
 registerCapabilitiesResource(server);
 registerDocsSearch(server);
+registerConnectTools(server, { getClient, ensureReady });
 
 // ── API Connection ──
 
@@ -629,6 +645,188 @@ server.tool(
 
     const list = providers.map((p) => `- ${p.name ?? "Unknown"} — ${p.description ?? "No description"}`).join("\n");
     return ok(`Available Storage Providers:\n\n${list}`);
+  },
+);
+
+// ── Service Accounts (Collaborators) ──
+//
+// Service accounts are the authentication principal for programmatic API access.
+// Identities are rotatable bearer tokens for a service account. When granting
+// filespace permissions to a service account, use the SERVICE ACCOUNT id as
+// principalId — never the identity id.
+//
+// Tokens are returned ONLY at identity creation time and cannot be retrieved
+// again. The create_* tools surface this clearly so the user knows to capture
+// the token immediately.
+
+server.tool(
+  "create_service_account",
+  "Create a service account (collaborator) and an initial identity (bearer token). The token is returned ONLY in this response — it cannot be retrieved later. Optionally control the initial identity's expiration or single-use behavior.",
+  {
+    name: z.string().describe("Human-readable name for the service account, e.g. 'ci-deploy-bot'"),
+    is_single_use: z.boolean().optional().describe("If true, the initial identity becomes invalid after its first successful use. Default false."),
+    expires_at: z.string().optional().describe("ISO-8601 timestamp at which the initial identity expires, e.g. '2026-12-31T23:59:59.000Z'. Omit for a non-expiring key."),
+  },
+  async ({ name, is_single_use, expires_at }) => {
+    const startErr = await ensureReady();
+    if (startErr) return err(formatError("Create Service Account", startErr));
+
+    const identity = (is_single_use !== undefined || expires_at !== undefined)
+      ? { isSingleUse: is_single_use, expiresAt: expires_at }
+      : undefined;
+
+    const res = await getClient().createServiceAccount(name, identity);
+    if (!res.success) return err(formatError("Create Service Account", res.error ?? "Unknown error"));
+
+    const data = (res.data as Record<string, unknown>)?.data as Record<string, unknown> ?? {};
+    const serviceIdentity = (data.serviceIdentity as Record<string, unknown>) ?? {};
+    const token = serviceIdentity.token as string | undefined;
+
+    let msg = formatSuccess("Service Account Created", {
+      serviceAccountId: data.id,
+      name: data.name,
+      createdAt: data.createdAt,
+      identityId: serviceIdentity.id,
+      expiresAt: serviceIdentity.expiresAt,
+      isSingleUse: serviceIdentity.isSingleUse,
+    });
+
+    if (token) {
+      msg += `\n\n⚠️  TOKEN (returned only once — store it now):\n${token}\n`;
+      msg += `\nAuth header: Authorization: Bearer ${token}\n`;
+      msg += `\nUse the serviceAccountId (${data.id}) as principalId when granting filespace permissions.`;
+    }
+    return ok(msg);
+  },
+);
+
+server.tool(
+  "list_service_accounts",
+  "List all service accounts (collaborators) in the workspace. Returns id, name, and createdAt for each. Tokens are never included.",
+  {},
+  async () => {
+    const startErr = await ensureReady();
+    if (startErr) return err(formatError("List Service Accounts", startErr));
+
+    const res = await getClient().listServiceAccounts();
+    if (!res.success) return err(formatError("List Service Accounts", res.error ?? "Unknown error"));
+
+    const accounts = (res.data as Record<string, unknown>)?.data as Record<string, unknown>[] ?? [];
+    if (accounts.length === 0) return ok("No service accounts found.");
+
+    const list = accounts.map((a) =>
+      `- ${a.name ?? "(unnamed)"} (ID: ${a.id ?? "N/A"}, created: ${a.createdAt ?? "?"})`
+    ).join("\n");
+    return ok(`Service Accounts:\n\n${list}`);
+  },
+);
+
+server.tool(
+  "get_service_account",
+  "Retrieve a service account by ID. Returns id, name, and createdAt.",
+  {
+    service_account_id: z.string().describe("Service account UUID (from list_service_accounts)"),
+  },
+  async ({ service_account_id }) => {
+    const startErr = await ensureReady();
+    if (startErr) return err(formatError("Get Service Account", startErr));
+
+    const res = await getClient().getServiceAccount(service_account_id);
+    if (!res.success) return err(formatError("Get Service Account", res.error ?? "Unknown error"));
+
+    const data = (res.data as Record<string, unknown>)?.data as Record<string, unknown> ?? {};
+    return ok(formatSuccess("Service Account", data));
+  },
+);
+
+server.tool(
+  "delete_service_account",
+  "Permanently delete a service account and revoke all of its identities (bearer tokens). This action cannot be undone — any code using a token from this account will lose access immediately.",
+  {
+    service_account_id: z.string().describe("Service account UUID to delete"),
+  },
+  async ({ service_account_id }) => {
+    const startErr = await ensureReady();
+    if (startErr) return err(formatError("Delete Service Account", startErr));
+
+    const res = await getClient().deleteServiceAccount(service_account_id);
+    if (!res.success) return err(formatError("Delete Service Account", res.error ?? "Unknown error"));
+    return ok(formatSuccess("Service Account Deleted", { serviceAccountId: service_account_id }));
+  },
+);
+
+server.tool(
+  "create_identity",
+  "Issue a new bearer token (identity) for an existing service account. Use to rotate keys, add environment-specific keys, or generate one-shot bootstrap tokens. The token is returned ONLY in this response — store it immediately, it cannot be retrieved again.",
+  {
+    service_account_id: z.string().describe("Parent service account UUID"),
+    is_single_use: z.boolean().optional().describe("If true, the identity becomes invalid after its first successful use. Useful for one-shot bootstrap flows. Default false."),
+    expires_at: z.string().optional().describe("ISO-8601 timestamp at which the identity expires, e.g. '2026-12-31T23:59:59.000Z'. Omit for a non-expiring key."),
+  },
+  async ({ service_account_id, is_single_use, expires_at }) => {
+    const startErr = await ensureReady();
+    if (startErr) return err(formatError("Create Identity", startErr));
+
+    const res = await getClient().createIdentity(service_account_id, {
+      isSingleUse: is_single_use,
+      expiresAt: expires_at,
+    });
+    if (!res.success) return err(formatError("Create Identity", res.error ?? "Unknown error"));
+
+    const data = (res.data as Record<string, unknown>)?.data as Record<string, unknown> ?? {};
+    const token = data.token as string | undefined;
+
+    let msg = formatSuccess("Identity Created", {
+      identityId: data.id,
+      status: data.status,
+      isSingleUse: data.isSingleUse,
+      expiresAt: data.expiresAt,
+    });
+    if (token) {
+      msg += `\n\n⚠️  TOKEN (returned only once — store it now):\n${token}\n`;
+      msg += `\nAuth header: Authorization: Bearer ${token}`;
+    }
+    return ok(msg);
+  },
+);
+
+server.tool(
+  "list_identities",
+  "List all identities (bearer tokens) for a service account. Returns id, status, expiration, single-use flag, and lastUsedAt for each. Tokens themselves are never returned by this endpoint.",
+  {
+    service_account_id: z.string().describe("Parent service account UUID"),
+  },
+  async ({ service_account_id }) => {
+    const startErr = await ensureReady();
+    if (startErr) return err(formatError("List Identities", startErr));
+
+    const res = await getClient().listIdentities(service_account_id);
+    if (!res.success) return err(formatError("List Identities", res.error ?? "Unknown error"));
+
+    const identities = (res.data as Record<string, unknown>)?.data as Record<string, unknown>[] ?? [];
+    if (identities.length === 0) return ok(`No identities found for service account ${service_account_id}.`);
+
+    const list = identities.map((i) =>
+      `- ID ${i.id ?? "N/A"}: status=${i.status ?? "?"}, isSingleUse=${i.isSingleUse ?? false}, expiresAt=${i.expiresAt ?? "never"}, lastUsedAt=${i.lastUsedAt ?? "never"}`
+    ).join("\n");
+    return ok(`Identities for ${service_account_id}:\n\n${list}`);
+  },
+);
+
+server.tool(
+  "delete_identity",
+  "Revoke a specific identity (bearer token) of a service account. Use this to rotate a leaked or stale key without removing the parent service account. The revocation is immediate.",
+  {
+    service_account_id: z.string().describe("Parent service account UUID"),
+    identity_id: z.string().describe("Identity UUID to revoke (from list_identities)"),
+  },
+  async ({ service_account_id, identity_id }) => {
+    const startErr = await ensureReady();
+    if (startErr) return err(formatError("Delete Identity", startErr));
+
+    const res = await getClient().deleteIdentity(service_account_id, identity_id);
+    if (!res.success) return err(formatError("Delete Identity", res.error ?? "Unknown error"));
+    return ok(formatSuccess("Identity Revoked", { serviceAccountId: service_account_id, identityId: identity_id }));
   },
 );
 

@@ -21,12 +21,16 @@ import { writeStackFiles } from "./audit-trail/stack-template.js";
 import { AUDIT_TRAIL_INDEX, VALID_ACTIONS } from "./audit-trail/types.js";
 import type { SearchHit } from "./audit-trail/types.js";
 import { discoverMounts } from "./audit-trail/mount-discovery.js";
+import { generateAuditDashboard } from "./blueprints/audit-dashboard.js";
+import type { AuditDashboardData } from "./blueprints/audit-dashboard.js";
 
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { homedir } from "node:os";
+import { execSync, spawn } from "node:child_process";
 
 const server = new McpServer(
-  { name: "lucidlink-audit-trail", version: "2.3.1" },
+  { name: "lucidlink-audit-trail", version: "2.5.4" },
   {
     instructions: `Audit trail analytics for LucidLink filespace file operation events.
 Manages a Docker Compose stack: OpenSearch + OpenSearch Dashboards + Fluent Bit.
@@ -36,10 +40,14 @@ SETUP WORKFLOW (follow in order):
   2. setup_audit_trail — generate stack files, configure mount point
   3. start_audit_trail — docker compose up, wait for health
 
-IMPORTANT: The stack includes a pre-built OpenSearch Dashboards instance with saved visualizations
-(user activity timeline, top users, event type distribution, most active paths).
-Do NOT build or generate a custom dashboard — just direct the user to http://localhost:5601
-once the stack is running. The dashboard is ready to use immediately.
+DASHBOARDS:
+  Pre-built (stock):  OpenSearch Dashboards at http://localhost:5601 with saved visualizations
+                      (timeline, top users, event mix, paths). Always available; powered by the
+                      Docker stack itself.
+  Custom (blueprint): create_audit_dashboard — generates a standalone, filterable React dashboard
+                      (snapshot or live) and opens it in the browser. Use whenever the user asks
+                      to create, build, or generate an audit-trail dashboard. Do NOT hand-write
+                      a UI from scratch.
 
 AFTER START: Fluent Bit automatically ingests real audit logs from the .lucid_audit directory
 on the mounted filespace. Events appear within 30 seconds. There is no need to load or generate
@@ -858,6 +866,60 @@ server.tool(
 
     return ok(
       `Audit trail index mapping:\n\n${JSON.stringify(resp.data, null, 2)}`,
+    );
+  },
+);
+
+// ── Dashboard generation ──
+
+server.tool(
+  "create_audit_dashboard",
+  "Generate a standalone web dashboard for audit trail data (filterable charts: timeline, top users, operation mix, hosts, hot paths, recent activity). Writes a small Node project, installs dependencies, opens the browser. Use whenever the user asks to create, build, or generate an audit-trail dashboard, UI, or report — never build one from scratch.",
+  {
+    output_dir: z.string().optional().describe("Directory to write files (default: ~/Desktop/audit-dashboard)"),
+    port: z.number().optional().describe("Port to serve on (default: 3199)"),
+    data: z.record(z.string(), z.unknown()).optional().describe("Optional snapshot data ({meta, users, actionGroups, osDist, hosts, daily, topPaths, recent}). Omit for sample data so the customer can see the dashboard rendered before wiring real data."),
+  },
+  async ({ output_dir, port, data }) => {
+    const actualPort = port ?? 3199;
+    const project = generateAuditDashboard({
+      port: actualPort,
+      data: data as AuditDashboardData | undefined,
+    });
+
+    const raw = output_dir || "~/Desktop/audit-dashboard";
+    const dir = raw.replace(/^~(?=$|\/)/, homedir()).replace(/\/+$/, "");
+
+    for (const [relPath, content] of Object.entries(project.files)) {
+      const fullPath = join(dir, relPath);
+      mkdirSync(dirname(fullPath), { recursive: true });
+      writeFileSync(fullPath, content, "utf-8");
+    }
+
+    try {
+      execSync("npm install --production", { cwd: dir, stdio: "pipe", timeout: 60000 });
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return err(
+        `Generated files in ${dir}/ but npm install failed:\n${msg}\n\nTry manually: cd ${dir} && npm install && npm start`,
+      );
+    }
+
+    const serverProcess = spawn("node", ["server.js"], {
+      cwd: dir,
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, PORT: String(actualPort) },
+    });
+    serverProcess.unref();
+    await new Promise((r) => setTimeout(r, 1500));
+
+    return ok(
+      `Audit Trail dashboard is running at http://localhost:${actualPort}\n\n` +
+      `Project files: ${dir}/\n` +
+      Object.keys(project.files).map((f) => `  ${f}`).join("\n") +
+      `\n\nThe server is running in the background. To stop it: kill ${serverProcess.pid}\n\n` +
+      project.instructions,
     );
   },
 );
