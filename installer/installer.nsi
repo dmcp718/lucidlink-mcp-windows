@@ -8,7 +8,7 @@
 ; --- Configuration ---
 !define APP_NAME "LucidLink MCP"
 !define APP_EXE "LucidLinkMCP.exe"
-!define APP_VERSION "2.2.0"
+!define APP_VERSION "2.3.1"
 !define APP_PUBLISHER "LucidLink"
 !define APP_URL "https://www.lucidlink.com"
 !define APP_DIR "$LOCALAPPDATA\Programs\LucidLinkMCP"

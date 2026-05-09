@@ -175,6 +175,14 @@ if (Test-Path $pyChunks) {
     Copy-Item -Path "$pyChunks\*.md" -Destination $destPyChunks
 }
 
+# Filespace search API reference (loaded by search-server.ts as an MCP resource)
+$searchDir = Join-Path (Join-Path $FILES_DIR "src") "search"
+if (Test-Path $searchDir) {
+    $destSearch = Join-Path (Join-Path $OUTPUT_DIR "mcp") "search"
+    New-Item -ItemType Directory -Force -Path $destSearch | Out-Null
+    Copy-Item -Path "$searchDir\*.md" -Destination $destSearch
+}
+
 # Production node_modules
 Copy-Item -Path (Join-Path $PROD_MODULES "node_modules") -Destination (Join-Path $OUTPUT_DIR "node_modules") -Recurse -Force
 
